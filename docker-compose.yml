@@ -1,0 +1,55 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-telemetry}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-telemetry}
+      POSTGRES_DB: ${POSTGRES_DB:-telemetry}
+    ports:
+      - "${POSTGRES_HOST_PORT:-5433}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-telemetry} -d ${POSTGRES_DB:-telemetry}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # Only starts when the "generate" profile is active:
+  #   docker compose --profile generate up -d      (or set COMPOSE_PROFILES=generate in .env)
+  generator:
+    profiles: ["generate"]
+    build:
+      context: .
+      args:
+        BIN: generator
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-telemetry}:${POSTGRES_PASSWORD:-telemetry}@postgres:5432/${POSTGRES_DB:-telemetry}
+      MODE: ${MODE:-backfill}
+      SENSOR_COUNT: ${SENSOR_COUNT:-50}
+      BATCH_SIZE: ${BATCH_SIZE:-50000}
+      TRUNCATE_ON_START: ${TRUNCATE_ON_START:-true}
+      # backfill mode
+      START_DATE: ${START_DATE:-}
+      END_DATE: ${END_DATE:-}
+      SAMPLE_INTERVAL_SECS: ${SAMPLE_INTERVAL_SECS:-300}
+      # live mode
+      BATCH_INTERVAL_MS: ${BATCH_INTERVAL_MS:-500}
+      TOTAL_ROWS: ${TOTAL_ROWS:-0}
+      RUST_LOG: info
+    # Backfill exits 0 when END_DATE is reached; only restart on a real failure.
+    restart: on-failure
+
+  # Later: the streaming API / front end goes here, same Dockerfile with BIN=api.
+  # api:
+  #   build: { context: ., args: { BIN: api } }
+  #   depends_on: { postgres: { condition: service_healthy } }
+  #   environment: { DATABASE_URL: ... }
+  #   ports: ["8080:8080"]
+
+volumes:
+  pgdata:
