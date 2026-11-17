@@ -285,35 +285,53 @@ async fn run_backfill(cfg: &Config, pool: &PgPool, devices: &mut [DeviceState], 
     result.and(restored)
 }
 
+/// Sensor-major backfill: for each device, walk the whole range once and COPY its three
+/// channels one after another. Rows for one sensor then sit on contiguous heap pages, so a
+/// per-sensor range scan touches only its own pages (time-major interleaving made a single
+/// sensor's history span every page of the table).
 async fn backfill_rows(cfg: &Config, pool: &PgPool, devices: &mut [DeviceState], rng: &mut StdRng) -> Result<()> {
-    let steps = (cfg.end - cfg.start).num_seconds() / cfg.sample_interval.num_seconds();
+    let steps = ((cfg.end - cfg.start).num_seconds() / cfg.sample_interval.num_seconds()).max(0) as usize;
     let expected = steps as u64 * devices.len() as u64 * METRICS_PER_DEVICE as u64;
     info!(start = %cfg.start, end = %cfg.end, interval_secs = cfg.sample_interval.num_seconds(), expected_rows = expected, "backfill starting");
 
     let started = std::time::Instant::now();
-    let mut buf: Vec<Reading> = Vec::with_capacity(cfg.batch_size + devices.len() * METRICS_PER_DEVICE);
     let mut inserted: u64 = 0;
-    let mut t = cfg.start;
     let mut last_log = std::time::Instant::now();
+    // One device's full range, all metrics interleaved: (steps * 3) readings.
+    let mut tick_buf: Vec<Reading> = Vec::with_capacity(steps * METRICS_PER_DEVICE);
+    let mut flush_buf: Vec<Reading> = Vec::with_capacity(cfg.batch_size);
 
-    while t < cfg.end {
-        for d in devices.iter_mut() {
-            d.sample(rng, t, &mut buf);
+    for d in devices.iter_mut() {
+        tick_buf.clear();
+        let mut t = cfg.start;
+        while t < cfg.end {
+            d.sample(rng, t, &mut tick_buf);
+            t += cfg.sample_interval;
         }
-        if buf.len() >= cfg.batch_size {
-            inserted += flush_copy(pool, &mut buf).await?;
-            if last_log.elapsed() >= Duration::from_secs(2) {
-                let pct = inserted as f64 * 100.0 / expected.max(1) as f64;
-                info!(inserted, pct = format!("{pct:.1}%"), cursor = %t, "backfill progress");
-                last_log = std::time::Instant::now();
+        // De-interleave: COPY each of the device's sensors as one contiguous run.
+        for m in 0..METRICS_PER_DEVICE {
+            for r in tick_buf.iter().skip(m).step_by(METRICS_PER_DEVICE) {
+                flush_buf.push(Reading { sensor_id: r.sensor_id, at: r.at, value: r.value });
+                if flush_buf.len() >= cfg.batch_size {
+                    inserted += flush_copy(pool, &mut flush_buf).await?;
+                }
             }
+            inserted += flush_copy(pool, &mut flush_buf).await?;
         }
-        t += cfg.sample_interval;
+        if last_log.elapsed() >= Duration::from_secs(2) {
+            let pct = inserted as f64 * 100.0 / expected.max(1) as f64;
+            info!(inserted, pct = format!("{pct:.1}%"), device = d.id, "backfill progress");
+            last_log = std::time::Instant::now();
+        }
     }
-    inserted += flush_copy(pool, &mut buf).await?;
 
     let secs = started.elapsed().as_secs_f64().max(0.001);
     info!(inserted, rows_per_sec = (inserted as f64 / secs) as u64, elapsed_secs = format!("{secs:.1}"), "backfill complete: END_DATE reached");
+
+    // Set visibility-map bits and refresh stats so counts and range scans are index-only.
+    let t = std::time::Instant::now();
+    sqlx::query("VACUUM ANALYZE readings").execute(pool).await.context("vacuum analyze")?;
+    info!(elapsed_secs = format!("{:.1}", t.elapsed().as_secs_f64()), "vacuum analyze complete");
     Ok(())
 }
 

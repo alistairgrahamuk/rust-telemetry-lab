@@ -79,12 +79,27 @@ MODE=live docker compose --profile generate up -d
 | `GET /api/readings/stream?sensor_ids=1,4,7&from=&to=` | NDJSON: a `{"type":"meta","count":N,...}` line, then `[sensor_id, ts_ms, value]` per row, ordered by sensor then time, streamed from a server-side cursor and gzip-compressed when accepted. `from`/`to` are RFC 3339; `to` is exclusive and both are optional. Up to 16 sensors per request. |
 | `GET /api/readings/live?sensor_ids=1,4&after=` | SSE `rows` events with batches of `[sensor_id, ts_ms, value]` newer than `after` (polled every second) |
 
-One sensor's full history (~300k rows) streams in under a second; eight sensors (2.4 M rows,
-11.6 MB gzip) in about 8 s. Timestamps are whole milliseconds end to end.
+Each sensor in the list is streamed as its own index-ordered cursor, back to back. One
+sensor's full history (~300k rows) streams in about 0.2 s; eight sensors (2.4 M rows, 60 MB)
+start within 150 ms and finish in about 2 s uncompressed or 4.6 s as 11.6 MB gzip. Timestamps
+are whole milliseconds end to end.
+
+### Why the table is written sensor-major
+
+The backfill writes one sensor's entire range, then the next, so a sensor's rows sit on
+contiguous heap pages. Written time-major (every sensor per tick) a single sensor's history
+spanned every page of the 2.3 GB table, and reading eight sensors meant reading it eight
+times; with the sensor-major layout the same query reads ~24 MB per sensor. The generator
+also runs `VACUUM ANALYZE` after a load so counts are index-only. Live-mode appends are
+time-major but small. If you add bulk loads from elsewhere, `CLUSTER readings USING
+readings_pkey` restores the layout.
 
 ## Front end (`web/`)
 
-Vite + React + TypeScript + Apache ECharts. A device × metric picker selects up to 8 sensors;
+Vite + React + TypeScript + Apache ECharts. Series are kept as flat typed arrays and handed
+to ECharts without copying; while rows stream, chart refreshes are paced by how long the last
+one took, so a 2.4 M-point load never blocks the page for more than ~0.3 s. A device ×
+metric picker selects up to 8 sensors;
 each keeps a fixed colour while selected. Sensors are grouped into one panel per unit (so
 different units never share an axis) with a shared crosshair, legend and zoom, LTTB
 downsampling for large ranges, presets anchored to the newest selected reading, a typed custom
@@ -121,7 +136,7 @@ docker-compose.yml      postgres + api, generator behind the `generate` profile
 - `sensors(id, device_id, metric, unit)`: one channel of a device; id = (device-1)*3 + metric index + 1
 - `readings(sensor_id, recorded_at, value)`
   - primary key `(sensor_id, recorded_at)`: one reading per sensor per instant, and serves per-sensor range queries
-  - BRIN on `recorded_at` for cheap whole-table time slices
+  - heap written sensor-major by the generator (see above); no time-only index
 
 ## Local dev without Docker for the Rust side
 

@@ -29,5 +29,6 @@ CREATE TABLE IF NOT EXISTS readings (
     CONSTRAINT readings_sensor_id_fkey FOREIGN KEY (sensor_id) REFERENCES sensors(id)
 );
 
--- Cheap time-range index that stays tiny even at hundreds of millions of rows.
-CREATE INDEX IF NOT EXISTS readings_time_brin_idx ON readings USING BRIN (recorded_at);
+-- The generator writes backfills sensor-major (one sensor's whole range, then the next), so
+-- each sensor's history is physically contiguous and a per-sensor range query reads only its
+-- own pages. A BRIN index on recorded_at would be useless with that layout, so there is none.

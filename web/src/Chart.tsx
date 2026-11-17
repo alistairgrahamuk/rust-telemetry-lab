@@ -67,17 +67,29 @@ interface Props {
   series: RefObject<SeriesMap>
   version: number
   selected: Selected[]
+  /** While true, chart refreshes are rate-limited; a final refresh runs when it turns false. */
+  streaming: boolean
 }
 
+/** Refresh pacing while rows stream in: never more often than this ... */
+const MIN_REFRESH_MS = 400
+/** ... and back off so a refresh costs at most ~1/5 of wall time (ECharts re-ingests every point). */
+const REFRESH_DUTY = 5
+const MAX_REFRESH_MS = 10_000
+
 /** Stacked panels (one per unit) with overlaid sensors, a shared x-axis, crosshair, legend and zoom. */
-export default function Chart({ series, version, selected }: Props) {
+export default function Chart({ series, version, selected, streaming }: Props) {
   const el = useRef<HTMLDivElement>(null)
   const chart = useRef<echarts.ECharts | null>(null)
+  const lastPush = useRef({ at: 0, cost: 0 })
+  const pushTimer = useRef<number | null>(null)
   const panels = useMemo(() => buildPanels(selected), [selected])
   const structureKey = panels.map((p) => `${p.unit}:${p.items.map((i) => `${i.sensor.id}@${i.slot}`).join('+')}`).join('|')
 
   // Series are flattened in panel order; this maps sensor id -> series index.
   const order = useMemo(() => panels.flatMap((p) => p.items), [panels])
+
+  const seriesData = (id: number) => series.current?.get(id)?.view() ?? new Float64Array(0)
 
   const buildOption = () => {
     const ink = cssVar('--text'), ink2 = cssVar('--text-2'), muted = cssVar('--muted'), grid = cssVar('--grid'), axis = cssVar('--axis'), surface = cssVar('--surface')
@@ -136,7 +148,10 @@ export default function Chart({ series, version, selected }: Props) {
         showSymbol: false, symbol: 'none',
         lineStyle: { width: 1.5, color: slotColor(it.slot) }, itemStyle: { color: slotColor(it.slot) },
         sampling: 'lttb', large: true, largeThreshold: 20_000,
-        data: series.current?.get(it.sensor.id) ?? [],
+        // Flat typed array of (ts, value) pairs; `dimensions` tells ECharts the stride.
+        dimensions: ['ts', 'value'],
+        encode: { x: 'ts', y: 'value' },
+        data: seriesData(it.sensor.id),
       }))),
     }
   }
@@ -160,13 +175,25 @@ export default function Chart({ series, version, selected }: Props) {
     return () => { ro.disconnect(); chart.current?.dispose(); chart.current = null }
   }, [])
 
-  // Data-only update when rows arrive: hand ECharts the current buffers in series order.
-  useEffect(() => {
+  // Data-only update: hand ECharts the current buffers in series order. ECharts re-ingests and
+  // re-samples every point on each call, so while streaming we pace calls by how long the last
+  // one took (otherwise a 2M-point load spends most of its time blocking the main thread).
+  const push = () => {
     const c = chart.current
     if (!c) return
-    c.setOption({ series: order.map((it) => ({ data: series.current?.get(it.sensor.id) ?? [] })) }, { lazyUpdate: true })
+    const t0 = performance.now()
+    c.setOption({ series: order.map((it) => ({ data: seriesData(it.sensor.id) })) }, { lazyUpdate: true })
+    lastPush.current = { at: performance.now(), cost: performance.now() - t0 }
+  }
+  useEffect(() => {
+    if (pushTimer.current != null) { window.clearTimeout(pushTimer.current); pushTimer.current = null }
+    if (!streaming) { push(); return }
+    const gap = Math.min(MAX_REFRESH_MS, Math.max(MIN_REFRESH_MS, lastPush.current.cost * REFRESH_DUTY))
+    const wait = lastPush.current.at + gap - performance.now()
+    if (wait <= 0) push()
+    else pushTimer.current = window.setTimeout(() => { pushTimer.current = null; push() }, wait)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [version, structureKey])
+  }, [version, structureKey, streaming])
 
   const label = order.map((it) => seriesName(it.sensor)).join(', ') || 'no sensors selected'
   return <div className="chart" ref={el} role="img" aria-label={`Readings over time for ${label}`} />

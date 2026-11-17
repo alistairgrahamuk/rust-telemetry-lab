@@ -129,8 +129,9 @@ export default function App() {
     if (!showTable) return []
     const rows: { ts: number; s: Sensor; v: number }[] = []
     for (const it of selected) {
-      const arr = series.current.get(it.sensor.id) ?? []
-      for (let i = Math.max(0, arr.length - 50); i < arr.length; i++) rows.push({ ts: arr[i][0], s: it.sensor, v: arr[i][1] })
+      const ser = series.current.get(it.sensor.id)
+      if (!ser) continue
+      for (let i = Math.max(0, ser.len - 50); i < ser.len; i++) rows.push({ ts: ser.ts(i), s: it.sensor, v: ser.value(i) })
     }
     return rows.sort((a, b) => b.ts - a.ts || a.s.id - b.s.id).slice(0, 50)
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -217,7 +218,7 @@ export default function App() {
       </div>
 
       <div className="chart-card">
-        <Chart series={series} version={state.version} selected={selected} />
+        <Chart series={series} version={state.version} selected={selected} streaming={state.phase === 'streaming'} />
       </div>
 
       {showTable && (
