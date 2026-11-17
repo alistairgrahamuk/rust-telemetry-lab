@@ -40,7 +40,7 @@ type Row = (i16, DateTime<Utc>, f32);
 const CHUNK_BYTES: usize = 64 * 1024;
 const LIVE_POLL: Duration = Duration::from_secs(1);
 const LIVE_BATCH_LIMIT: i64 = 50_000;
-const MAX_SENSORS_PER_REQUEST: usize = 16;
+const MAX_SENSORS_PER_REQUEST: usize = 32;
 
 #[derive(Clone)]
 struct AppState {
