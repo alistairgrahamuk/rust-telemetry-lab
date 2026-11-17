@@ -76,7 +76,7 @@ MODE=live docker compose --profile generate up -d
 | Endpoint | Returns |
 |---|---|
 | `GET /api/sensors` | every sensor (device channel) with device, location, metric, unit and `first_ms`/`last_ms` |
-| `GET /api/readings/stream?sensor_ids=1,4,7&from=&to=` | NDJSON: a `{"type":"meta","count":N,...}` line, then `[sensor_id, ts_ms, value]` per row, ordered by sensor then time, streamed from a server-side cursor and gzip-compressed when accepted. `from`/`to` are RFC 3339; `to` is exclusive and both are optional. Up to 32 sensors per request. |
+| `GET /api/readings/stream?sensor_ids=1,4,7&from=&to=` | NDJSON: a `{"type":"meta","count":N,...}` line, then `[sensor_id, ts_ms, value]` per row, ordered by sensor then time, streamed from a server-side cursor and gzip-compressed when accepted. `from`/`to` are RFC 3339; `to` is exclusive and both are optional. Up to 16 sensors per request. |
 | `GET /api/readings/live?sensor_ids=1,4&after=` | SSE `rows` events with batches of `[sensor_id, ts_ms, value]` newer than `after` (polled every second) |
 
 Each sensor in the list is streamed as its own index-ordered cursor, back to back. One
@@ -100,14 +100,8 @@ Vite + React + TypeScript + Apache ECharts. A Web Worker fetches and parses the 
 stream byte by byte and posts rows back as transferable typed arrays; series are kept as flat
 typed arrays and handed to ECharts without copying; while rows stream, chart refreshes are
 paced by how long the last one took. Eight sensors over all time (2.4 M points) load in about
-2.3 s and never block the page for more than ~0.3 s.
-
-Two layouts. **Overlay** (default) groups the selected sensors into one panel per unit so
-different units never share an axis, with a legend and a fixed colour per sensor; it takes up
-to 8 sensors because that is how many colours stay distinguishable. **Grid** draws one small
-panel per sensor, device by device so a row reads as one device and its metrics, colours by
-metric, and shares y-axis bounds per unit so panels are comparable; it takes up to 32 sensors
-(24 sensors over all time is 7.3 M rows and ~7 s). A device × metric picker selects sensors;
+2.3 s and never block the page for more than ~0.3 s. A device × metric picker selects up to 8
+sensors;
 each keeps a fixed colour while selected. Sensors are grouped into one panel per unit (so
 different units never share an axis) with a shared crosshair, legend and zoom, LTTB
 downsampling for large ranges, presets anchored to the newest selected reading, a typed custom

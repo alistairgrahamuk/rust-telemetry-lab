@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { fetchSensors, type Sensor } from './api'
 import { useReadings } from './useReadings'
-import Chart, { GRID_LIMIT, GRID_ROW_PX, SLOT_COUNT, colorSlot, gridColumns, seriesName, type Layout, type Selected } from './Chart'
+import Chart, { SLOT_COUNT, seriesName, type Selected } from './Chart'
 
 const DAY = 86_400_000
 const PRESETS: { label: string; days: number | null }[] = [
@@ -63,7 +63,6 @@ export default function App() {
   const [custom, setCustom] = useState<{ from: number; to: number } | null>(null)
   const [draft, setDraft] = useState({ from: '', to: '' })
   const [draftError, setDraftError] = useState<string | null>(null)
-  const [layout, setLayout] = useState<Layout>('overlay')
   const [live, setLive] = useState(true)
   const [showTable, setShowTable] = useState(false)
   const [loadError, setLoadError] = useState<string | null>(null)
@@ -111,17 +110,13 @@ export default function App() {
     [slots, byId],
   )
   const idsKey = useMemo(() => [...slots.keys()].sort((a, b) => a - b).join(','), [slots])
-  const limit = layout === 'grid' ? GRID_LIMIT : SLOT_COUNT
-  const atLimit = slots.size >= limit
-  const swatchVar = (it: Selected) => `var(--series-${colorSlot(it, layout) + 1})`
+  const atLimit = slots.size >= SLOT_COUNT
 
-  // Colour slots: the first 8 selected sensors get a fixed overlay colour each; beyond that
-  // (grid layout only) the slot is just a stable ordinal, and the grid colours by metric.
   const toggle = (id: number) => {
     setSlots((m) => {
       const next = new Map(m)
       if (next.has(id)) { next.delete(id); return next }
-      if (next.size >= limit) return m
+      if (next.size >= SLOT_COUNT) return m
       const used = new Set(next.values())
       let slot = 0
       while (used.has(slot)) slot++
@@ -129,7 +124,6 @@ export default function App() {
       return next
     })
   }
-  const overlayAllowed = slots.size <= SLOT_COUNT
 
   // Presets are anchored to the newest reading among the selected sensors so they always show
   // data, even on a historical dataset. Presets leave `to` open so the live tail can attach.
@@ -165,9 +159,6 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.version])
 
-  // Grid layout grows with the number of rows and lets the page scroll.
-  const gridHeight = Math.max(360, Math.ceil(selected.length / gridColumns(selected.length, window.innerWidth - 32)) * GRID_ROW_PX + 60)
-
   const pct = state.expected ? Math.min(100, (state.loaded / state.expected) * 100) : 0
   const mbps = state.elapsedMs > 0 ? (state.bytesHint / 1_048_576) / (state.elapsedMs / 1000) : 0
 
@@ -191,7 +182,7 @@ export default function App() {
 
         <div className="picker" ref={pickerRef}>
           <button aria-haspopup="dialog" aria-expanded={pickerOpen} onClick={() => setPickerOpen((o) => !o)}>
-            Sensors ({slots.size}/{limit}) ▾
+            Sensors ({slots.size}/{SLOT_COUNT}) ▾
           </button>
           {pickerOpen && (
             <div className="popover" role="dialog" aria-label="Choose sensors">
@@ -207,7 +198,7 @@ export default function App() {
                         return (
                           <button key={s.id} className="metric-chip" aria-pressed={on} disabled={!on && atLimit}
                             onClick={() => toggle(s.id)} title={`${s.metric} (${s.unit})`}>
-                            {on && <span className="swatch" style={{ background: swatchVar({ sensor: s, slot: slots.get(s.id)! }) }} />}
+                            {on && <span className="swatch" style={{ background: `var(--series-${slots.get(s.id)! + 1})` }} />}
                             {s.metric}
                           </button>
                         )
@@ -217,7 +208,7 @@ export default function App() {
                 ))}
                 {!visibleDevices.length && <div className="empty">No devices match</div>}
               </div>
-              {atLimit && <div className="hint">{layout === 'grid' ? `Up to ${GRID_LIMIT} panels in the grid layout.` : `Up to ${SLOT_COUNT} sensors can be overlaid; switch to Grid for more.`}</div>}
+              {atLimit && <div className="hint">Up to {SLOT_COUNT} sensors can be overlaid at once.</div>}
             </div>
           )}
         </div>
@@ -225,7 +216,7 @@ export default function App() {
         <div className="chips">
           {selected.map((it) => (
             <span className="chip" key={it.sensor.id}>
-              <span className="swatch" style={{ background: swatchVar(it) }} />
+              <span className="swatch" style={{ background: `var(--series-${it.slot + 1})` }} />
               {seriesName(it.sensor)}
               <button className="chip-x" aria-label={`Remove ${seriesName(it.sensor)}`} onClick={() => toggle(it.sensor.id)}>×</button>
             </span>
@@ -245,11 +236,6 @@ export default function App() {
             onFocus={prefillDraft} onChange={(e) => setDraft({ ...draft, to: e.target.value })} onKeyDown={(e) => e.key === 'Enter' && applyCustom()} />
           <button onClick={applyCustom} disabled={!draft.from || !draft.to}>Apply</button>
         </span>
-        <div className="presets" role="group" aria-label="Layout">
-          <button aria-pressed={layout === 'overlay'} disabled={!overlayAllowed} onClick={() => setLayout('overlay')}
-            title={overlayAllowed ? 'Overlay sensors, one panel per unit' : `Overlay shows up to ${SLOT_COUNT} sensors; deselect some first`}>Overlay</button>
-          <button aria-pressed={layout === 'grid'} onClick={() => setLayout('grid')} title="One small panel per sensor, scales shared per unit">Grid</button>
-        </div>
         <label className="toggle"><input type="checkbox" checked={live} onChange={(e) => setLive(e.target.checked)} /> Live tail</label>
         <label className="toggle"><input type="checkbox" checked={showTable} onChange={(e) => setShowTable(e.target.checked)} /> Table</label>
       </div>
@@ -275,8 +261,8 @@ export default function App() {
         {(draftError || state.error || loadError) && <span className="error">{draftError ?? state.error ?? loadError}</span>}
       </div>
 
-      <div className="chart-card" style={layout === 'grid' ? { flex: 'none', height: gridHeight } : undefined}>
-        <Chart series={series} version={state.version} selected={selected} layout={layout} streaming={state.phase === 'streaming'} />
+      <div className="chart-card">
+        <Chart series={series} version={state.version} selected={selected} streaming={state.phase === 'streaming'} />
       </div>
 
       {showTable && (
@@ -287,7 +273,7 @@ export default function App() {
               {latest.map((r) => (
                 <tr key={`${r.s.id}-${r.ts}`}>
                   <td>{new Date(r.ts).toLocaleString()}</td>
-                  <td><span className="swatch" style={{ background: swatchVar({ sensor: r.s, slot: slots.get(r.s.id)! }) }} />{seriesName(r.s)}</td>
+                  <td><span className="swatch" style={{ background: `var(--series-${slots.get(r.s.id)! + 1})` }} />{seriesName(r.s)}</td>
                   <td>{r.v.toFixed(1)} {r.s.unit}</td>
                 </tr>
               ))}
