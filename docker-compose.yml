@@ -16,12 +16,30 @@ services:
       timeout: 3s
       retries: 10
 
+  # Streaming read API + React front end: http://localhost:8080
+  api:
+    build:
+      context: .
+      target: api
+      args:
+        BIN: api
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-telemetry}:${POSTGRES_PASSWORD:-telemetry}@postgres:5432/${POSTGRES_DB:-telemetry}
+      RUST_LOG: info
+    ports:
+      - "${API_HOST_PORT:-8080}:8080"
+    restart: unless-stopped
+
   # Only starts when the "generate" profile is active:
   #   docker compose --profile generate up -d      (or set COMPOSE_PROFILES=generate in .env)
   generator:
     profiles: ["generate"]
     build:
       context: .
+      target: runtime
       args:
         BIN: generator
     depends_on:
@@ -44,12 +62,6 @@ services:
     # Backfill exits 0 when END_DATE is reached; only restart on a real failure.
     restart: on-failure
 
-  # Later: the streaming API / front end goes here, same Dockerfile with BIN=api.
-  # api:
-  #   build: { context: ., args: { BIN: api } }
-  #   depends_on: { postgres: { condition: service_healthy } }
-  #   environment: { DATABASE_URL: ... }
-  #   ports: ["8080:8080"]
 
 volumes:
   pgdata:

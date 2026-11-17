@@ -1,0 +1,14 @@
+import { defineConfig } from 'vite'
+import react from '@vitejs/plugin-react'
+
+// In dev, /api is proxied to the Rust API so there is no CORS to configure.
+export default defineConfig({
+  plugins: [react()],
+  server: {
+    port: 5173,
+    proxy: {
+      '/api': { target: 'http://localhost:8080', changeOrigin: true },
+    },
+  },
+  build: { outDir: 'dist', sourcemap: false, chunkSizeWarningLimit: 1000 },
+})

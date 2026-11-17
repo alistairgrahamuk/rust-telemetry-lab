@@ -302,7 +302,9 @@ async fn run_live(cfg: &Config, pool: &PgPool, sensors: &mut [SensorState], rng:
                 return Ok(());
             }
             _ = ticker.tick() => {
-                let now = Utc::now();
+                // Truncate to whole milliseconds: the API/front end track "last seen" at ms
+                // precision, so sub-ms timestamps would be re-sent by the live tail.
+                let now = DateTime::from_timestamp_millis(Utc::now().timestamp_millis()).unwrap();
                 for i in 0..cfg.batch_size {
                     let s = &mut sensors[i % sensors.len()];
                     // Spread the batch across the interval so timestamps aren't all identical.

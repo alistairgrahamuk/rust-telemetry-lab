@@ -1,17 +1,21 @@
 # rust-telemetry-lab
 
-Postgres + a Rust generator that bulk-inserts random-walk sensor readings. A streaming
-API/front end will be added later as a second crate using the same Dockerfile.
+Postgres + a Rust generator that bulk-inserts random-walk sensor readings, and a Rust API
+that streams them to a React/ECharts front end.
 
 ## Run
 
 ```sh
 cp .env.example .env                        # optional, defaults work
-docker compose up -d                        # postgres only
-docker compose --profile generate up -d     # postgres + generator (inserts data)
+docker compose up -d                        # postgres + api (http://localhost:8080)
+docker compose --profile generate up -d     # ...plus the generator (inserts data)
 docker compose logs -f generator
 docker compose stop generator               # stop inserting, keep postgres up
 ```
+
+Open http://localhost:8080. Pick a sensor and a range; rows stream in as NDJSON and the three
+panels fill progressively. With the generator in live mode (`MODE=live`), new rows arrive over
+Server-Sent Events and are appended to the chart.
 
 The generator sits behind the `generate` Compose profile, so it never starts unless you ask.
 To make it the default, put `COMPOSE_PROFILES=generate` in `.env`.
@@ -63,15 +67,47 @@ MODE=live docker compose --profile generate up -d
 | `BATCH_INTERVAL_MS`    | 500          | live mode: pause between batches                     |
 | `TOTAL_ROWS`           | 0            | live mode: stop after N rows (0 = forever)           |
 | `POSTGRES_HOST_PORT`   | 5433         | host port mapped to Postgres                         |
+| `API_HOST_PORT`        | 8080         | host port for the web UI + API                       |
+
+## API
+
+| Endpoint | Returns |
+|---|---|
+| `GET /api/sensors` | sensors with `first_ms`/`last_ms` of their readings |
+| `GET /api/readings/stream?sensor_id=&from=&to=` | NDJSON: a `{"type":"meta","count":N,...}` line, then `[ts_ms, temp, hum, pressure]` per row, streamed from a server-side cursor and gzip-compressed when accepted. `from`/`to` are RFC 3339; `to` is exclusive and both are optional. |
+| `GET /api/readings/live?sensor_id=&after=` | SSE `rows` events with batches of rows newer than `after` (polled every second) |
+
+A sensor's full history (~300k rows, 11 MB) streams in about 0.7 s uncompressed or 1.5 s as
+2.8 MB gzip. Timestamps are whole milliseconds end to end.
+
+## Front end (`web/`)
+
+Vite + React + TypeScript + Apache ECharts. Three stacked single-series panels with a shared
+crosshair and zoom, LTTB downsampling for large ranges, presets anchored to the sensor's last
+reading, a custom range, a live-tail toggle and a table view. Light and dark follow the OS.
+
+```sh
+cd web && npm install
+npm run dev          # http://localhost:5173, /api proxied to the Rust API on :8080
+```
+
+Run the API locally against the Compose Postgres:
+
+```sh
+DATABASE_URL=postgres://telemetry:telemetry@localhost:5433/telemetry STATIC_DIR=web/dist cargo run -p api
+```
 
 ## Layout
 
 ```
 Cargo.toml              workspace
 crates/generator/       data generator (sqlx + tokio)
+crates/api/             axum API: streaming history, SSE live tail, serves web/dist
+web/                    React front end (Vite, ECharts)
 db/init/001_schema.sql  schema, applied on first postgres start
-Dockerfile              multi-stage; `--build-arg BIN=<crate>` builds any workspace binary
-docker-compose.yml      postgres + generator (api service stubbed in comments)
+Dockerfile              multi-stage; `--target runtime --build-arg BIN=<crate>` for a bare
+                        binary, `--target api` for the API bundled with the built front end
+docker-compose.yml      postgres + api, generator behind the `generate` profile
 ```
 
 ## Schema
