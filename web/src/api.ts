@@ -1,16 +1,19 @@
 export interface Sensor {
   id: number
-  name: string
+  device_id: number
+  device: string
   location: string
+  metric: string
+  unit: string
   first_ms: number | null
   last_ms: number | null
 }
 
-/** [timestamp_ms, temperature, humidity, pressure] */
-export type Reading = [number, number, number, number]
+/** [sensor_id, timestamp_ms, value] */
+export type Reading = [number, number, number]
 
 export interface StreamMeta {
-  sensor_id: number
+  sensor_ids: number[]
   count: number
   from_ms: number
   to_ms: number
@@ -28,22 +31,22 @@ export interface StreamHandlers {
 }
 
 /**
- * Streams NDJSON rows for a sensor/range, calling onRows for every network chunk so the
- * chart can render progressively. Resolves when the server closes the stream.
+ * Streams NDJSON rows for a set of sensors over a range, calling onRows for every network
+ * chunk so the chart can render progressively. Resolves when the server closes the stream.
  */
 export async function streamReadings(
-  sensorId: number,
+  sensorIds: number[],
   fromMs: number | null,
   toMs: number | null,
   handlers: StreamHandlers,
   signal: AbortSignal,
 ): Promise<void> {
-  const params = new URLSearchParams({ sensor_id: String(sensorId) })
+  const params = new URLSearchParams({ sensor_ids: sensorIds.join(',') })
   if (fromMs != null) params.set('from', new Date(fromMs).toISOString())
   if (toMs != null) params.set('to', new Date(toMs).toISOString())
 
   const res = await fetch(`/api/readings/stream?${params}`, { signal })
-  if (!res.ok || !res.body) throw new Error(`stream: HTTP ${res.status}`)
+  if (!res.ok || !res.body) throw new Error(`stream: HTTP ${res.status} ${await res.text().catch(() => '')}`)
 
   const reader = res.body.getReader()
   const decoder = new TextDecoder()
@@ -73,14 +76,14 @@ export async function streamReadings(
   if (tail.trim()) handlers.onRows([JSON.parse(tail)])
 }
 
-/** Subscribes to new rows after `afterMs` via SSE. Returns a disposer. */
+/** Subscribes to new rows after `afterMs` for a set of sensors via SSE. Returns a disposer. */
 export function subscribeLive(
-  sensorId: number,
+  sensorIds: number[],
   afterMs: number,
   onRows: (rows: Reading[]) => void,
   onError: (msg: string) => void,
 ): () => void {
-  const params = new URLSearchParams({ sensor_id: String(sensorId), after: new Date(afterMs).toISOString() })
+  const params = new URLSearchParams({ sensor_ids: sensorIds.join(','), after: new Date(afterMs).toISOString() })
   const es = new EventSource(`/api/readings/live?${params}`)
   es.addEventListener('rows', (e) => onRows(JSON.parse((e as MessageEvent).data)))
   es.addEventListener('error', (e) => {

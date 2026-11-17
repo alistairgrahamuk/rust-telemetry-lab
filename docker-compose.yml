@@ -48,7 +48,7 @@ services:
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-telemetry}:${POSTGRES_PASSWORD:-telemetry}@postgres:5432/${POSTGRES_DB:-telemetry}
       MODE: ${MODE:-backfill}
-      SENSOR_COUNT: ${SENSOR_COUNT:-50}
+      DEVICE_COUNT: ${DEVICE_COUNT:-50}
       BATCH_SIZE: ${BATCH_SIZE:-50000}
       TRUNCATE_ON_START: ${TRUNCATE_ON_START:-true}
       # backfill mode

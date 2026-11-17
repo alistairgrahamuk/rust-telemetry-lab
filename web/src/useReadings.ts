@@ -3,6 +3,9 @@ import { streamReadings, subscribeLive, type Reading } from './api'
 
 export type Phase = 'idle' | 'streaming' | 'done' | 'error'
 
+/** Per-sensor series of [timestamp_ms, value], appended in time order. */
+export type SeriesMap = Map<number, [number, number][]>
+
 export interface ReadingsState {
   phase: Phase
   loaded: number
@@ -12,7 +15,7 @@ export interface ReadingsState {
   liveCount: number
   liveConnected: boolean
   error: string | null
-  /** Bumped whenever `rows` changes; consumers re-render off this instead of copying arrays. */
+  /** Bumped whenever the series change; consumers re-render off this instead of copying arrays. */
   version: number
 }
 
@@ -25,14 +28,29 @@ const initial: ReadingsState = {
 const RENDER_EVERY_MS = 150
 
 /**
- * Owns the row buffer for one sensor/range. Rows live in a ref (mutated in place, hundreds of
- * thousands of entries) and a cheap `version` counter drives re-renders at a bounded rate.
+ * Owns the row buffers for a set of sensors over one range. Series live in a ref (mutated in
+ * place, hundreds of thousands of points) and a cheap `version` counter drives re-renders at a
+ * bounded rate. `idsKey` is the sorted, comma-joined sensor ids so deps stay stable.
  */
-export function useReadings(sensorId: number | null, fromMs: number | null, toMs: number | null, live: boolean) {
-  const rows = useRef<Reading[]>([])
+export function useReadings(idsKey: string, fromMs: number | null, toMs: number | null, live: boolean) {
+  const series = useRef<SeriesMap>(new Map())
+  const loaded = useRef(0)
   const [state, setState] = useState<ReadingsState>(initial)
   const flushTimer = useRef<number | null>(null)
   const pending = useRef<Partial<ReadingsState>>({})
+  const liveCount = useRef(0)
+
+  const ids = idsKey ? idsKey.split(',').map(Number) : []
+
+  const append = (batch: Reading[]) => {
+    const m = series.current
+    for (const [sid, ts, v] of batch) {
+      let arr = m.get(sid)
+      if (!arr) { arr = []; m.set(sid, arr) }
+      arr.push([ts, v])
+    }
+    loaded.current += batch.length
+  }
 
   // Coalesce many onRows calls into at most one setState per RENDER_EVERY_MS.
   const scheduleFlush = useCallback((patch: Partial<ReadingsState>, immediate = false) => {
@@ -41,7 +59,7 @@ export function useReadings(sensorId: number | null, fromMs: number | null, toMs
       flushTimer.current = null
       const p = pending.current
       pending.current = {}
-      setState((s) => ({ ...s, ...p, loaded: rows.current.length, version: s.version + 1 }))
+      setState((s) => ({ ...s, ...p, loaded: loaded.current, liveCount: liveCount.current, version: s.version + 1 }))
     }
     if (immediate) {
       if (flushTimer.current != null) window.clearTimeout(flushTimer.current)
@@ -53,20 +71,22 @@ export function useReadings(sensorId: number | null, fromMs: number | null, toMs
 
   // History stream: restart whenever the selection changes.
   useEffect(() => {
-    rows.current = []
+    series.current = new Map()
+    loaded.current = 0
+    liveCount.current = 0
     setState({ ...initial })
-    if (sensorId == null) return
+    if (!ids.length) return
 
     const ctrl = new AbortController()
     const started = performance.now()
     let bytes = 0
     scheduleFlush({ phase: 'streaming' }, true)
 
-    streamReadings(sensorId, fromMs, toMs, {
+    streamReadings(ids, fromMs, toMs, {
       onMeta: (m) => scheduleFlush({ expected: m.count }),
       onRows: (batch) => {
-        for (const r of batch) rows.current.push(r)
-        bytes += batch.length * 36 // ~bytes per NDJSON row, good enough for a rate readout
+        append(batch)
+        bytes += batch.length * 24 // ~bytes per NDJSON row, good enough for a rate readout
         scheduleFlush({ bytesHint: bytes, elapsedMs: performance.now() - started })
       },
     }, ctrl.signal)
@@ -81,31 +101,27 @@ export function useReadings(sensorId: number | null, fromMs: number | null, toMs
       if (flushTimer.current != null) window.clearTimeout(flushTimer.current)
       flushTimer.current = null
     }
-  }, [sensorId, fromMs, toMs, scheduleFlush])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [idsKey, fromMs, toMs, scheduleFlush])
 
   // Live tail: only once history has finished, and only if the range is open-ended.
   useEffect(() => {
-    if (!live || sensorId == null || state.phase !== 'done' || toMs != null) return
-    const last = rows.current.length ? rows.current[rows.current.length - 1][0] : Date.now()
+    if (!live || !ids.length || state.phase !== 'done' || toMs != null) return
+    let last = 0
+    for (const arr of series.current.values()) if (arr.length) last = Math.max(last, arr[arr.length - 1][0])
     scheduleFlush({ liveConnected: true }, true)
     const dispose = subscribeLive(
-      sensorId,
-      last,
-      (batch) => {
-        for (const r of batch) rows.current.push(r)
-        scheduleFlush({ liveCount: (pending.current.liveCount ?? stateRef.current.liveCount) + batch.length })
-      },
+      ids,
+      last || Date.now(),
+      (batch) => { append(batch); liveCount.current += batch.length; scheduleFlush({}) },
       (msg) => scheduleFlush({ error: msg }),
     )
     return () => {
       dispose()
       scheduleFlush({ liveConnected: false }, true)
     }
-  }, [live, sensorId, toMs, state.phase, scheduleFlush])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [live, idsKey, toMs, state.phase, scheduleFlush])
 
-  // Latest state for callbacks without re-subscribing.
-  const stateRef = useRef(state)
-  stateRef.current = state
-
-  return { rows, state }
+  return { series, state }
 }

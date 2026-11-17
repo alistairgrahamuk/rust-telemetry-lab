@@ -1,22 +1,25 @@
-import { useEffect, useRef, type RefObject } from 'react'
+import { useEffect, useMemo, useRef, type RefObject } from 'react'
 import * as echarts from 'echarts/core'
 import { LineChart } from 'echarts/charts'
-import { DataZoomComponent, GridComponent, TitleComponent, TooltipComponent } from 'echarts/components'
+import { DataZoomComponent, GridComponent, LegendComponent, TitleComponent, TooltipComponent } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
-import type { Reading } from './api'
+import type { Sensor } from './api'
+import type { SeriesMap } from './useReadings'
 
-echarts.use([LineChart, GridComponent, TooltipComponent, DataZoomComponent, TitleComponent, CanvasRenderer])
+echarts.use([LineChart, GridComponent, TooltipComponent, DataZoomComponent, TitleComponent, LegendComponent, CanvasRenderer])
 
-type Panel = { key: 1 | 2 | 3; title: string; unit: string; cssVar: string; decimals: number }
-const PANELS: Panel[] = [
-  { key: 1, title: 'Temperature', unit: '°C', cssVar: '--s-temp', decimals: 1 },
-  { key: 2, title: 'Humidity', unit: '%', cssVar: '--s-hum', decimals: 1 },
-  { key: 3, title: 'Pressure', unit: 'hPa', cssVar: '--s-press', decimals: 1 },
-]
+/** Fixed slot order; a sensor keeps its slot for as long as it is selected. */
+export const SLOT_COUNT = 8
+
+/** Panels are ordered by metric so the layout is predictable; unknown metrics go last. */
+const METRIC_ORDER = ['temperature', 'humidity', 'pressure']
 
 function cssVar(name: string) {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim()
 }
+export const slotColor = (slot: number) => cssVar(`--series-${slot + 1}`)
+
+export const seriesName = (s: Sensor) => `${s.device} ${s.metric}`
 
 function fmtTime(ms: number) {
   return new Date(ms).toLocaleString(undefined, {
@@ -24,94 +27,147 @@ function fmtTime(ms: number) {
   })
 }
 
-interface Props {
-  /** Shared, mutated-in-place buffer; `version` tells us when to re-read it. */
-  rows: RefObject<Reading[]>
-  version: number
-  title: string
+export interface Selected {
+  sensor: Sensor
+  slot: number
 }
 
-/** Three stacked single-series line panels with one shared x-axis, crosshair and zoom. */
-export default function Chart({ rows, version, title }: Props) {
+interface Panel {
+  unit: string
+  title: string
+  items: Selected[]
+}
+
+/** Group selected sensors by unit: one panel per unit, so different units never share an axis. */
+export function buildPanels(selected: Selected[]): Panel[] {
+  const byUnit = new Map<string, Panel>()
+  for (const it of selected) {
+    const u = it.sensor.unit
+    let p = byUnit.get(u)
+    if (!p) {
+      p = { unit: u, title: '', items: [] }
+      byUnit.set(u, p)
+    }
+    p.items.push(it)
+  }
+  const panels = [...byUnit.values()]
+  for (const p of panels) {
+    const metrics = [...new Set(p.items.map((i) => i.sensor.metric))]
+    p.title = `${metrics.map((m) => m[0].toUpperCase() + m.slice(1)).join(' / ')} (${p.unit})`
+  }
+  const rank = (p: Panel) => {
+    const i = METRIC_ORDER.indexOf(p.items[0].sensor.metric)
+    return i < 0 ? METRIC_ORDER.length : i
+  }
+  return panels.sort((a, b) => rank(a) - rank(b) || a.unit.localeCompare(b.unit))
+}
+
+interface Props {
+  /** Shared, mutated-in-place buffers; `version` tells us when to re-read them. */
+  series: RefObject<SeriesMap>
+  version: number
+  selected: Selected[]
+}
+
+/** Stacked panels (one per unit) with overlaid sensors, a shared x-axis, crosshair, legend and zoom. */
+export default function Chart({ series, version, selected }: Props) {
   const el = useRef<HTMLDivElement>(null)
   const chart = useRef<echarts.ECharts | null>(null)
+  const panels = useMemo(() => buildPanels(selected), [selected])
+  const structureKey = panels.map((p) => `${p.unit}:${p.items.map((i) => `${i.sensor.id}@${i.slot}`).join('+')}`).join('|')
 
-  // Create once; recreate on theme change so colours are re-read.
+  // Series are flattened in panel order; this maps sensor id -> series index.
+  const order = useMemo(() => panels.flatMap((p) => p.items), [panels])
+
+  const buildOption = () => {
+    const ink = cssVar('--text'), ink2 = cssVar('--text-2'), muted = cssVar('--muted'), grid = cssVar('--grid'), axis = cssVar('--axis'), surface = cssVar('--surface')
+    const n = Math.max(panels.length, 1)
+    const legendH = order.length > 1 ? 7 : 0        // % of height reserved for the legend row
+    const top = 4 + legendH, bottom = 12             // % reserved above (titles/legend) and below (zoom slider)
+    const span = (100 - top - bottom) / n
+    const gridFor = (i: number) => ({ top: `${top + i * span + 4}%`, height: `${span - 8}%`, left: 64, right: 24 })
+
+    return {
+      animation: false,
+      backgroundColor: 'transparent',
+      textStyle: { fontFamily: 'system-ui, -apple-system, "Segoe UI", sans-serif' },
+      legend: {
+        show: order.length > 1, top: 6, left: 64, right: 24, type: 'scroll',
+        icon: 'roundRect', itemWidth: 14, itemHeight: 4,
+        textStyle: { color: ink2, fontSize: 12 },
+        data: order.map((it) => seriesName(it.sensor)),
+      },
+      title: panels.map((p, i) => ({
+        text: p.title, left: 64, top: `${top + i * span - 0.5}%`,
+        textStyle: { fontSize: 13, fontWeight: 600, color: ink2 },
+      })),
+      axisPointer: { link: [{ xAxisIndex: 'all' }], lineStyle: { color: muted }, label: { backgroundColor: ink2 } },
+      tooltip: {
+        trigger: 'axis', backgroundColor: surface, borderColor: axis, textStyle: { color: ink, fontSize: 12 },
+        formatter: (params: unknown) => {
+          const ps = params as { seriesIndex: number; seriesName: string; value: [number, number]; marker: string }[]
+          if (!ps.length) return ''
+          const unit = order[ps[0].seriesIndex]?.sensor.unit ?? ''
+          const lines = ps.map((p) => `${p.marker} ${p.seriesName}: <b>${p.value[1].toFixed(1)} ${unit}</b>`)
+          return `${fmtTime(ps[0].value[0])}<br/>${lines.join('<br/>')}`
+        },
+      },
+      grid: panels.map((_, i) => gridFor(i)),
+      xAxis: panels.map((_, i) => ({
+        type: 'time', gridIndex: i,
+        axisLine: { lineStyle: { color: axis } }, axisTick: { show: i === panels.length - 1 },
+        axisLabel: { show: i === panels.length - 1, color: muted, hideOverlap: true },
+        splitLine: { show: false },
+      })),
+      yAxis: panels.map((_, i) => ({
+        type: 'value', gridIndex: i, scale: true,
+        axisLabel: { color: muted }, splitLine: { lineStyle: { color: grid } }, splitNumber: 3,
+      })),
+      dataZoom: [
+        { type: 'inside', xAxisIndex: panels.map((_, i) => i), filterMode: 'filter' },
+        {
+          type: 'slider', xAxisIndex: panels.map((_, i) => i), bottom: 8, height: 22, left: 64, right: 24,
+          borderColor: axis, fillerColor: 'rgba(42,120,214,0.12)', handleStyle: { color: surface, borderColor: muted },
+          textStyle: { color: muted }, dataBackground: { lineStyle: { color: axis }, areaStyle: { color: grid } },
+        },
+      ],
+      series: panels.flatMap((p, gi) => p.items.map((it) => ({
+        name: seriesName(it.sensor), type: 'line', xAxisIndex: gi, yAxisIndex: gi,
+        showSymbol: false, symbol: 'none',
+        lineStyle: { width: 1.5, color: slotColor(it.slot) }, itemStyle: { color: slotColor(it.slot) },
+        sampling: 'lttb', large: true, largeThreshold: 20_000,
+        data: series.current?.get(it.sensor.id) ?? [],
+      }))),
+    }
+  }
+
+  // Create once; rebuild the whole option when the panel structure or theme changes.
   useEffect(() => {
     if (!el.current) return
-    const build = () => {
-      chart.current?.dispose()
-      const c = echarts.init(el.current!, undefined, { renderer: 'canvas' })
-      chart.current = c
-      const ink2 = cssVar('--text-2'), muted = cssVar('--muted'), grid = cssVar('--grid'), axis = cssVar('--axis'), surface = cssVar('--surface')
-      const rowsOf = (i: number) => ({ top: `${6 + i * 29}%`, height: '22%', left: 64, right: 24 })
-
-      c.setOption({
-        animation: false,
-        backgroundColor: 'transparent',
-        textStyle: { fontFamily: 'system-ui, -apple-system, "Segoe UI", sans-serif' },
-        title: PANELS.map((p, i) => ({
-          text: `${p.title} (${p.unit})`, left: 64, top: `${1.5 + i * 29}%`,
-          textStyle: { fontSize: 13, fontWeight: 600, color: ink2 },
-        })),
-        axisPointer: { link: [{ xAxisIndex: 'all' }], lineStyle: { color: muted }, label: { backgroundColor: ink2 } },
-        tooltip: {
-          trigger: 'axis', backgroundColor: surface, borderColor: axis, textStyle: { color: cssVar('--text'), fontSize: 12 },
-          formatter: (params: unknown) => {
-            const ps = params as { seriesIndex: number; value: [number, number]; marker: string }[]
-            if (!ps.length) return ''
-            const p = PANELS[ps[0].seriesIndex]
-            return `${fmtTime(ps[0].value[0])}<br/>${ps[0].marker} ${p.title}: <b>${ps[0].value[1].toFixed(p.decimals)} ${p.unit}</b>`
-          },
-        },
-        grid: PANELS.map((_, i) => rowsOf(i)),
-        xAxis: PANELS.map((_, i) => ({
-          type: 'time', gridIndex: i,
-          axisLine: { lineStyle: { color: axis } }, axisTick: { show: i === 2 },
-          axisLabel: { show: i === 2, color: muted, hideOverlap: true },
-          splitLine: { show: false },
-        })),
-        yAxis: PANELS.map((_, i) => ({
-          type: 'value', gridIndex: i, scale: true,
-          axisLabel: { color: muted }, splitLine: { lineStyle: { color: grid } },
-          splitNumber: 3,
-        })),
-        dataZoom: [
-          { type: 'inside', xAxisIndex: [0, 1, 2], filterMode: 'filter' },
-          { type: 'slider', xAxisIndex: [0, 1, 2], bottom: 8, height: 22, left: 64, right: 24, borderColor: axis, fillerColor: 'rgba(42,120,214,0.12)', handleStyle: { color: surface, borderColor: muted }, textStyle: { color: muted }, dataBackground: { lineStyle: { color: axis }, areaStyle: { color: grid } } },
-        ],
-        series: PANELS.map((p, i) => ({
-          name: p.title, type: 'line', xAxisIndex: i, yAxisIndex: i,
-          showSymbol: false, symbol: 'none', lineStyle: { width: 1.5, color: cssVar(p.cssVar) }, itemStyle: { color: cssVar(p.cssVar) },
-          sampling: 'lttb', large: true, largeThreshold: 20_000,
-          data: [],
-        })),
-      })
-    }
-    build()
+    if (!chart.current) chart.current = echarts.init(el.current, undefined, { renderer: 'canvas' })
+    chart.current.setOption(buildOption(), { notMerge: true })
     const mq = window.matchMedia('(prefers-color-scheme: dark)')
-    const onTheme = () => { build(); pushData() }
+    const onTheme = () => chart.current?.setOption(buildOption(), { notMerge: true })
     mq.addEventListener('change', onTheme)
+    return () => mq.removeEventListener('change', onTheme)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [structureKey])
+
+  useEffect(() => {
+    if (!el.current) return
     const ro = new ResizeObserver(() => chart.current?.resize())
     ro.observe(el.current)
-    return () => { mq.removeEventListener('change', onTheme); ro.disconnect(); chart.current?.dispose(); chart.current = null }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    return () => { ro.disconnect(); chart.current?.dispose(); chart.current = null }
   }, [])
 
-  // Re-split the shared buffer into per-metric [ts, value] pairs and hand it to ECharts.
-  const pushData = () => {
+  // Data-only update when rows arrive: hand ECharts the current buffers in series order.
+  useEffect(() => {
     const c = chart.current
     if (!c) return
-    const src = rows.current ?? []
-    const n = src.length
-    const t = new Array<[number, number]>(n), h = new Array<[number, number]>(n), p = new Array<[number, number]>(n)
-    for (let i = 0; i < n; i++) {
-      const r = src[i]
-      t[i] = [r[0], r[1]]; h[i] = [r[0], r[2]]; p[i] = [r[0], r[3]]
-    }
-    c.setOption({ series: [{ data: t }, { data: h }, { data: p }] }, { lazyUpdate: true })
-  }
-  useEffect(pushData, [version]) // eslint-disable-line react-hooks/exhaustive-deps
+    c.setOption({ series: order.map((it) => ({ data: series.current?.get(it.sensor.id) ?? [] })) }, { lazyUpdate: true })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [version, structureKey])
 
-  return <div className="chart" ref={el} role="img" aria-label={`${title}: temperature, humidity and pressure over time`} />
+  const label = order.map((it) => seriesName(it.sensor)).join(', ') || 'no sensors selected'
+  return <div className="chart" ref={el} role="img" aria-label={`Readings over time for ${label}`} />
 }

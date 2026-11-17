@@ -1,5 +1,8 @@
 //! Generates realistic IoT sensor readings and bulk-inserts them into Postgres.
 //!
+//! Each *device* has three *sensors* (temperature, humidity, pressure); every reading is one
+//! value for one sensor, so a device produces three rows per tick.
+//!
 //! Two modes, chosen by `MODE`:
 //!   backfill (default) - one reading per sensor every SAMPLE_INTERVAL_SECS from START_DATE
 //!                        to END_DATE, written flat out; exits when END_DATE is reached.
@@ -23,7 +26,7 @@ enum Mode {
 struct Config {
     database_url: String,
     mode: Mode,
-    sensor_count: i16,
+    device_count: i16,
     batch_size: usize,
     truncate_on_start: bool,
     // backfill
@@ -58,7 +61,7 @@ impl Config {
         Ok(Self {
             database_url: std::env::var("DATABASE_URL").context("DATABASE_URL is required")?,
             mode,
-            sensor_count: env_or("SENSOR_COUNT", 50),
+            device_count: env_or("DEVICE_COUNT", env_or("SENSOR_COUNT", 50)),
             batch_size: env_or("BATCH_SIZE", 50_000),
             truncate_on_start: env_or("TRUNCATE_ON_START", true),
             start,
@@ -84,8 +87,16 @@ fn env_or<T: std::str::FromStr>(key: &str, default: T) -> T {
     std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
 }
 
-/// Per-sensor state so each series drifts smoothly instead of being white noise.
-struct SensorState {
+/// Metrics every device exposes, in sensor-id order. Sensor id = (device-1)*3 + index + 1.
+const METRICS: [(&str, &str); 3] = [("temperature", "°C"), ("humidity", "%"), ("pressure", "hPa")];
+const METRICS_PER_DEVICE: usize = METRICS.len();
+
+fn sensor_id(device: i16, metric_idx: usize) -> i16 {
+    (device - 1) * METRICS_PER_DEVICE as i16 + metric_idx as i16 + 1
+}
+
+/// Per-device state so each series drifts smoothly instead of being white noise.
+struct DeviceState {
     id: i16,
     baseline: [f32; 3],
     temperature: f32,
@@ -96,12 +107,10 @@ struct SensorState {
 struct Reading {
     sensor_id: i16,
     at: DateTime<Utc>,
-    temperature: f32,
-    humidity: f32,
-    pressure: f32,
+    value: f32,
 }
 
-impl SensorState {
+impl DeviceState {
     fn new(id: i16, rng: &mut impl Rng) -> Self {
         let baseline = [rng.gen_range(15.0..25.0), rng.gen_range(35.0..65.0), rng.gen_range(995.0..1025.0)];
         Self { id, baseline, temperature: baseline[0], humidity: baseline[1], pressure: baseline[2] }
@@ -109,7 +118,8 @@ impl SensorState {
 
     /// Random walk with a weak pull back to baseline, plus a daily temperature/humidity cycle
     /// (warmest ~15:00 UTC, driest at the same time) so a month of data has visible structure.
-    fn sample(&mut self, rng: &mut impl Rng, at: DateTime<Utc>) -> Reading {
+    /// Pushes one reading per metric.
+    fn sample(&mut self, rng: &mut impl Rng, at: DateTime<Utc>, out: &mut Vec<Reading>) {
         const REVERT: f32 = 0.01;
         self.temperature = (self.temperature + REVERT * (self.baseline[0] - self.temperature) + rng.gen_range(-0.3..0.3)).clamp(-20.0, 60.0);
         self.humidity = (self.humidity + REVERT * (self.baseline[1] - self.humidity) + rng.gen_range(-0.8..0.8)).clamp(0.0, 100.0);
@@ -118,30 +128,56 @@ impl SensorState {
         let day_frac = at.num_seconds_from_midnight() as f32 / 86_400.0;
         let diurnal = (TAU * (day_frac - 0.375)).sin(); // peaks at 15:00, trough at 03:00
 
-        Reading {
-            sensor_id: self.id,
-            at,
-            temperature: self.temperature + 4.0 * diurnal,
-            humidity: (self.humidity - 8.0 * diurnal).clamp(0.0, 100.0),
-            pressure: self.pressure,
+        let values = [
+            self.temperature + 4.0 * diurnal,
+            (self.humidity - 8.0 * diurnal).clamp(0.0, 100.0),
+            self.pressure,
+        ];
+        for (i, value) in values.into_iter().enumerate() {
+            out.push(Reading { sensor_id: sensor_id(self.id, i), at, value });
         }
     }
 }
 
-async fn ensure_sensors(pool: &PgPool, count: i16) -> Result<()> {
+async fn ensure_devices_and_sensors(pool: &PgPool, count: i16) -> Result<()> {
     let ids: Vec<i16> = (1..=count).collect();
     let names: Vec<String> = ids.iter().map(|i| format!("sensor-{i:03}")).collect();
     let locations: Vec<String> =
         ids.iter().map(|i| format!("building-{}/floor-{}", (i - 1) / 20 + 1, (i - 1) % 20 / 5 + 1)).collect();
 
     sqlx::query(
-        "INSERT INTO sensors (id, name, location)
+        "INSERT INTO devices (id, name, location)
          SELECT * FROM UNNEST($1::smallint[], $2::text[], $3::text[])
          ON CONFLICT (id) DO NOTHING",
     )
     .bind(&ids)
     .bind(&names)
     .bind(&locations)
+    .execute(pool)
+    .await
+    .context("seeding devices")?;
+
+    let mut s_ids = Vec::with_capacity(ids.len() * METRICS_PER_DEVICE);
+    let mut s_dev = Vec::with_capacity(s_ids.capacity());
+    let mut s_metric = Vec::with_capacity(s_ids.capacity());
+    let mut s_unit = Vec::with_capacity(s_ids.capacity());
+    for &d in &ids {
+        for (m, (metric, unit)) in METRICS.iter().enumerate() {
+            s_ids.push(sensor_id(d, m));
+            s_dev.push(d);
+            s_metric.push(*metric);
+            s_unit.push(*unit);
+        }
+    }
+    sqlx::query(
+        "INSERT INTO sensors (id, device_id, metric, unit)
+         SELECT * FROM UNNEST($1::smallint[], $2::smallint[], $3::text[], $4::text[])
+         ON CONFLICT (id) DO NOTHING",
+    )
+    .bind(&s_ids)
+    .bind(&s_dev)
+    .bind(&s_metric)
+    .bind(&s_unit)
     .execute(pool)
     .await
     .context("seeding sensors")?;
@@ -155,26 +191,21 @@ async fn flush_insert(pool: &PgPool, buf: &mut Vec<Reading>) -> Result<u64> {
         return Ok(0);
     }
     let n = buf.len();
-    let (mut ids, mut ts, mut temps, mut hums, mut press) =
-        (Vec::with_capacity(n), Vec::with_capacity(n), Vec::with_capacity(n), Vec::with_capacity(n), Vec::with_capacity(n));
+    let (mut ids, mut ts, mut vals) = (Vec::with_capacity(n), Vec::with_capacity(n), Vec::with_capacity(n));
     for r in buf.drain(..) {
         ids.push(r.sensor_id);
         ts.push(r.at);
-        temps.push(r.temperature);
-        hums.push(r.humidity);
-        press.push(r.pressure);
+        vals.push(r.value);
     }
 
     let result = sqlx::query(
-        "INSERT INTO readings (sensor_id, recorded_at, temperature, humidity, pressure)
-         SELECT * FROM UNNEST($1::smallint[], $2::timestamptz[], $3::real[], $4::real[], $5::real[])
+        "INSERT INTO readings (sensor_id, recorded_at, value)
+         SELECT * FROM UNNEST($1::smallint[], $2::timestamptz[], $3::real[])
          ON CONFLICT (sensor_id, recorded_at) DO NOTHING",
     )
     .bind(&ids)
     .bind(&ts)
-    .bind(&temps)
-    .bind(&hums)
-    .bind(&press)
+    .bind(&vals)
     .execute(pool)
     .await
     .context("inserting readings batch")?;
@@ -187,21 +218,19 @@ const PG_EPOCH_OFFSET_US: i64 = 946_684_800_000_000;
 const COPY_SIGNATURE: &[u8] = b"PGCOPY\n\xff\r\n\0";
 
 fn encode_copy_binary(buf: &[Reading]) -> Vec<u8> {
-    // header 19 bytes + 2 trailer + per row: 2 (field count) + 5 * 4 (lengths) + 2 + 8 + 4 + 4 + 4
-    let mut out = Vec::with_capacity(21 + buf.len() * 44);
+    // header 19 bytes + 2 trailer + per row: 2 (field count) + 3 * 4 (lengths) + 2 + 8 + 4
+    let mut out = Vec::with_capacity(21 + buf.len() * 28);
     out.extend_from_slice(COPY_SIGNATURE);
     out.extend_from_slice(&0i32.to_be_bytes()); // flags
     out.extend_from_slice(&0i32.to_be_bytes()); // header extension length
     for r in buf {
-        out.extend_from_slice(&5i16.to_be_bytes());
+        out.extend_from_slice(&3i16.to_be_bytes());
         out.extend_from_slice(&2i32.to_be_bytes());
         out.extend_from_slice(&r.sensor_id.to_be_bytes());
         out.extend_from_slice(&8i32.to_be_bytes());
         out.extend_from_slice(&(r.at.timestamp_micros() - PG_EPOCH_OFFSET_US).to_be_bytes());
-        for v in [r.temperature, r.humidity, r.pressure] {
-            out.extend_from_slice(&4i32.to_be_bytes());
-            out.extend_from_slice(&v.to_be_bytes());
-        }
+        out.extend_from_slice(&4i32.to_be_bytes());
+        out.extend_from_slice(&r.value.to_be_bytes());
     }
     out.extend_from_slice(&(-1i16).to_be_bytes());
     out
@@ -217,7 +246,7 @@ async fn flush_copy(pool: &PgPool, buf: &mut Vec<Reading>) -> Result<u64> {
     let bytes = encode_copy_binary(buf);
     buf.clear();
     let mut copy = pool
-        .copy_in_raw("COPY readings (sensor_id, recorded_at, temperature, humidity, pressure) FROM STDIN (FORMAT binary)")
+        .copy_in_raw("COPY readings (sensor_id, recorded_at, value) FROM STDIN (FORMAT binary)")
         .await
         .context("starting COPY")?;
     copy.send(bytes).await.context("sending COPY data")?;
@@ -248,28 +277,28 @@ async fn restore_sensor_fk(pool: &PgPool) -> Result<()> {
     Ok(())
 }
 
-async fn run_backfill(cfg: &Config, pool: &PgPool, sensors: &mut [SensorState], rng: &mut StdRng) -> Result<()> {
+async fn run_backfill(cfg: &Config, pool: &PgPool, devices: &mut [DeviceState], rng: &mut StdRng) -> Result<()> {
     drop_sensor_fk(pool).await?;
-    let result = backfill_rows(cfg, pool, sensors, rng).await;
+    let result = backfill_rows(cfg, pool, devices, rng).await;
     // Always try to put the constraint back, even if the load failed part-way.
     let restored = restore_sensor_fk(pool).await;
     result.and(restored)
 }
 
-async fn backfill_rows(cfg: &Config, pool: &PgPool, sensors: &mut [SensorState], rng: &mut StdRng) -> Result<()> {
+async fn backfill_rows(cfg: &Config, pool: &PgPool, devices: &mut [DeviceState], rng: &mut StdRng) -> Result<()> {
     let steps = (cfg.end - cfg.start).num_seconds() / cfg.sample_interval.num_seconds();
-    let expected = steps as u64 * sensors.len() as u64;
+    let expected = steps as u64 * devices.len() as u64 * METRICS_PER_DEVICE as u64;
     info!(start = %cfg.start, end = %cfg.end, interval_secs = cfg.sample_interval.num_seconds(), expected_rows = expected, "backfill starting");
 
     let started = std::time::Instant::now();
-    let mut buf: Vec<Reading> = Vec::with_capacity(cfg.batch_size + sensors.len());
+    let mut buf: Vec<Reading> = Vec::with_capacity(cfg.batch_size + devices.len() * METRICS_PER_DEVICE);
     let mut inserted: u64 = 0;
     let mut t = cfg.start;
     let mut last_log = std::time::Instant::now();
 
     while t < cfg.end {
-        for s in sensors.iter_mut() {
-            buf.push(s.sample(rng, t));
+        for d in devices.iter_mut() {
+            d.sample(rng, t, &mut buf);
         }
         if buf.len() >= cfg.batch_size {
             inserted += flush_copy(pool, &mut buf).await?;
@@ -288,7 +317,7 @@ async fn backfill_rows(cfg: &Config, pool: &PgPool, sensors: &mut [SensorState],
     Ok(())
 }
 
-async fn run_live(cfg: &Config, pool: &PgPool, sensors: &mut [SensorState], rng: &mut StdRng) -> Result<()> {
+async fn run_live(cfg: &Config, pool: &PgPool, devices: &mut [DeviceState], rng: &mut StdRng) -> Result<()> {
     info!(batch = cfg.batch_size, interval_ms = cfg.batch_interval.as_millis(), total = cfg.total_rows, "live mode starting");
     let mut buf: Vec<Reading> = Vec::with_capacity(cfg.batch_size);
     let mut inserted: u64 = 0;
@@ -305,10 +334,13 @@ async fn run_live(cfg: &Config, pool: &PgPool, sensors: &mut [SensorState], rng:
                 // Truncate to whole milliseconds: the API/front end track "last seen" at ms
                 // precision, so sub-ms timestamps would be re-sent by the live tail.
                 let now = DateTime::from_timestamp_millis(Utc::now().timestamp_millis()).unwrap();
-                for i in 0..cfg.batch_size {
-                    let s = &mut sensors[i % sensors.len()];
+                let ticks = cfg.batch_size / (devices.len() * METRICS_PER_DEVICE);
+                for i in 0..ticks.max(1) {
                     // Spread the batch across the interval so timestamps aren't all identical.
-                    buf.push(s.sample(rng, now - ChronoDuration::milliseconds((cfg.batch_size - i) as i64)));
+                    let at = now - ChronoDuration::milliseconds((ticks - i) as i64);
+                    for d in devices.iter_mut() {
+                        d.sample(rng, at, &mut buf);
+                    }
                 }
                 inserted += flush_insert(pool, &mut buf).await?;
                 let secs = started.elapsed().as_secs_f64().max(0.001);
@@ -329,7 +361,7 @@ async fn main() -> Result<()> {
         .init();
 
     let cfg = Config::from_env()?;
-    info!(mode = ?cfg.mode, sensors = cfg.sensor_count, truncate = cfg.truncate_on_start, "starting generator");
+    info!(mode = ?cfg.mode, devices = cfg.device_count, sensors = cfg.device_count as usize * METRICS_PER_DEVICE, truncate = cfg.truncate_on_start, "starting generator");
 
     let pool = PgPoolOptions::new()
         .max_connections(4)
@@ -342,14 +374,14 @@ async fn main() -> Result<()> {
         sqlx::query("TRUNCATE readings RESTART IDENTITY").execute(&pool).await.context("truncating readings")?;
         info!("cleared existing readings");
     }
-    ensure_sensors(&pool, cfg.sensor_count).await?;
+    ensure_devices_and_sensors(&pool, cfg.device_count).await?;
 
     let mut rng = StdRng::from_entropy();
-    let mut sensors: Vec<SensorState> = (1..=cfg.sensor_count).map(|id| SensorState::new(id, &mut rng)).collect();
+    let mut devices: Vec<DeviceState> = (1..=cfg.device_count).map(|id| DeviceState::new(id, &mut rng)).collect();
 
     match cfg.mode {
-        Mode::Backfill => run_backfill(&cfg, &pool, &mut sensors, &mut rng).await?,
-        Mode::Live => run_live(&cfg, &pool, &mut sensors, &mut rng).await?,
+        Mode::Backfill => run_backfill(&cfg, &pool, &mut devices, &mut rng).await?,
+        Mode::Live => run_live(&cfg, &pool, &mut devices, &mut rng).await?,
     }
 
     pool.close().await;

@@ -13,8 +13,9 @@ docker compose logs -f generator
 docker compose stop generator               # stop inserting, keep postgres up
 ```
 
-Open http://localhost:8080. Pick a sensor and a range; rows stream in as NDJSON and the three
-panels fill progressively. With the generator in live mode (`MODE=live`), new rows arrive over
+Open http://localhost:8080. Pick up to 8 sensors (any device, any metric) and a range; rows
+stream in as NDJSON and the chart fills progressively, one panel per unit with the selected
+sensors overlaid. With the generator in live mode (`MODE=live`), new rows arrive over
 Server-Sent Events and are appended to the chart.
 
 The generator sits behind the `generate` Compose profile, so it never starts unless you ask.
@@ -32,8 +33,9 @@ Stop with `docker compose down` (keeps data) or `docker compose down -v` (drops 
 ## Generator modes
 
 **backfill** (default) writes one reading per sensor every `SAMPLE_INTERVAL_SECS` (5 min) from
-`START_DATE` to `END_DATE`, flat out, and exits when the end date is reached. A month of 50
-sensors is 432,000 rows and takes a few seconds. Series have a random walk, mean reversion and a
+`START_DATE` to `END_DATE`, flat out, and exits when the end date is reached. Each device has
+three sensors (temperature, humidity, pressure), so 50 devices are 150 sensors and a month is
+1.3 M rows; 2024-01-01 to 2026-11-17 (45 M rows) loads in about 2.5 minutes. Series have a random walk, mean reversion and a
 daily temperature/humidity cycle so the data looks like real IoT telemetry.
 
 Backfill loads with binary `COPY` and temporarily drops the `readings -> sensors` foreign
@@ -49,8 +51,8 @@ are skipped rather than duplicated.
 ```sh
 # a specific month
 START_DATE=2026-10-01 END_DATE=2026-11-01 docker compose --profile generate up -d
-# last 30 days (defaults), 200 sensors, 1-minute cadence
-SENSOR_COUNT=200 SAMPLE_INTERVAL_SECS=60 docker compose --profile generate up -d
+# last 30 days (defaults), 200 devices (600 sensors), 1-minute cadence
+DEVICE_COUNT=200 SAMPLE_INTERVAL_SECS=60 docker compose --profile generate up -d
 # keep appending live data
 MODE=live docker compose --profile generate up -d
 ```
@@ -58,7 +60,7 @@ MODE=live docker compose --profile generate up -d
 | Variable               | Default      | Meaning                                              |
 |------------------------|--------------|------------------------------------------------------|
 | `MODE`                 | backfill     | `backfill` or `live`                                 |
-| `SENSOR_COUNT`         | 50           | distinct sensors                                     |
+| `DEVICE_COUNT`         | 50           | devices; each has 3 sensors (channels)               |
 | `BATCH_SIZE`           | 50000        | rows per COPY (backfill) or INSERT (live)            |
 | `TRUNCATE_ON_START`    | true         | clear `readings` before the run                      |
 | `START_DATE`           | END_DATE-30d | backfill start, `YYYY-MM-DD` or RFC 3339             |
@@ -73,18 +75,21 @@ MODE=live docker compose --profile generate up -d
 
 | Endpoint | Returns |
 |---|---|
-| `GET /api/sensors` | sensors with `first_ms`/`last_ms` of their readings |
-| `GET /api/readings/stream?sensor_id=&from=&to=` | NDJSON: a `{"type":"meta","count":N,...}` line, then `[ts_ms, temp, hum, pressure]` per row, streamed from a server-side cursor and gzip-compressed when accepted. `from`/`to` are RFC 3339; `to` is exclusive and both are optional. |
-| `GET /api/readings/live?sensor_id=&after=` | SSE `rows` events with batches of rows newer than `after` (polled every second) |
+| `GET /api/sensors` | every sensor (device channel) with device, location, metric, unit and `first_ms`/`last_ms` |
+| `GET /api/readings/stream?sensor_ids=1,4,7&from=&to=` | NDJSON: a `{"type":"meta","count":N,...}` line, then `[sensor_id, ts_ms, value]` per row, ordered by sensor then time, streamed from a server-side cursor and gzip-compressed when accepted. `from`/`to` are RFC 3339; `to` is exclusive and both are optional. Up to 16 sensors per request. |
+| `GET /api/readings/live?sensor_ids=1,4&after=` | SSE `rows` events with batches of `[sensor_id, ts_ms, value]` newer than `after` (polled every second) |
 
-A sensor's full history (~300k rows, 11 MB) streams in about 0.7 s uncompressed or 1.5 s as
-2.8 MB gzip. Timestamps are whole milliseconds end to end.
+One sensor's full history (~300k rows) streams in under a second; eight sensors (2.4 M rows,
+11.6 MB gzip) in about 8 s. Timestamps are whole milliseconds end to end.
 
 ## Front end (`web/`)
 
-Vite + React + TypeScript + Apache ECharts. Three stacked single-series panels with a shared
-crosshair and zoom, LTTB downsampling for large ranges, presets anchored to the sensor's last
-reading, a custom range, a live-tail toggle and a table view. Light and dark follow the OS.
+Vite + React + TypeScript + Apache ECharts. A device × metric picker selects up to 8 sensors;
+each keeps a fixed colour while selected. Sensors are grouped into one panel per unit (so
+different units never share an axis) with a shared crosshair, legend and zoom, LTTB
+downsampling for large ranges, presets anchored to the newest selected reading, a typed custom
+range (`YYYY-MM-DD HH:MM`, local time), a live-tail toggle and a table view. Light and dark
+follow the OS.
 
 ```sh
 cd web && npm install
@@ -112,9 +117,10 @@ docker-compose.yml      postgres + api, generator behind the `generate` profile
 
 ## Schema
 
-- `sensors(id, name, location, created_at)`
-- `readings(id, sensor_id, recorded_at, temperature, humidity, pressure)`
-  - unique btree on `(sensor_id, recorded_at)`: one reading per sensor per instant, and serves per-sensor range queries
+- `devices(id, name, location, created_at)`: a physical unit at a location
+- `sensors(id, device_id, metric, unit)`: one channel of a device; id = (device-1)*3 + metric index + 1
+- `readings(sensor_id, recorded_at, value)`
+  - primary key `(sensor_id, recorded_at)`: one reading per sensor per instant, and serves per-sensor range queries
   - BRIN on `recorded_at` for cheap whole-table time slices
 
 ## Local dev without Docker for the Rust side
