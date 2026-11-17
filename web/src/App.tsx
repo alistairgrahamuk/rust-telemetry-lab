@@ -26,6 +26,33 @@ function parseLocal(s: string) {
 
 interface DeviceRow { id: number; name: string; location: string; sensors: Sensor[] }
 
+const HOUR = 3_600_000, MONTH = 30.44 * DAY, YEAR = 365.25 * DAY
+/**
+ * Approximate, readable span: the two largest non-zero units, e.g. "~2 years 3 months",
+ * "~6 days 4 hours", "~28 hours" (hours are used up to 3 days), "~45 minutes".
+ */
+function humanSpan(ms: number): string {
+  if (!(ms > 0)) return ''
+  const unit = (n: number, name: string) => `${n} ${name}${n === 1 ? '' : 's'}`
+  if (ms < HOUR) return `~${unit(Math.max(1, Math.round(ms / 60_000)), 'minute')}`
+  if (ms < 3 * DAY) {
+    const h = Math.floor(ms / HOUR), m = Math.round((ms - h * HOUR) / 60_000)
+    return `~${unit(h, 'hour')}${m ? ' ' + unit(m, 'minute') : ''}`
+  }
+  const parts: [number, string][] = [[YEAR, 'year'], [MONTH, 'month'], [DAY, 'day'], [HOUR, 'hour']]
+  const out: string[] = []
+  let rest = ms
+  for (const [size, name] of parts) {
+    const n = Math.floor(rest / size)
+    if (n > 0 || out.length) {
+      if (n > 0) out.push(unit(n, name))
+      rest -= n * size
+    }
+    if (out.length === 2) break
+  }
+  return `~${out.join(' ')}`
+}
+
 export default function App() {
   const [sensors, setSensors] = useState<Sensor[]>([])
   /** sensor id -> colour slot; insertion order is selection order. */
@@ -121,6 +148,17 @@ export default function App() {
     if (!draft.from && !draft.to && Number.isFinite(firstMs) && lastMs) setDraft({ from: fmtLocal(firstMs), to: fmtLocal(lastMs) })
   }
 
+  // Span of the data actually loaded (across all selected series), shown in the status line.
+  const span = useMemo(() => {
+    let min = Infinity, max = 0
+    for (const ser of series.current.values()) {
+      if (!ser.len) continue
+      min = Math.min(min, ser.ts(0)); max = Math.max(max, ser.lastTs())
+    }
+    return max > min ? { min, max, text: humanSpan(max - min) } : null
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.version])
+
   const pct = state.expected ? Math.min(100, (state.loaded / state.expected) * 100) : 0
   const mbps = state.elapsedMs > 0 ? (state.bytesHint / 1_048_576) / (state.elapsedMs / 1000) : 0
 
@@ -209,7 +247,13 @@ export default function App() {
           <div className="progress"><div style={{ width: `${pct}%` }} /></div>
           <span>{mbps.toFixed(1)} MB/s</span>
         </>}
-        {state.phase === 'done' && <span>{nf.format(state.loaded)} rows · {selected.length} series in {(state.elapsedMs / 1000).toFixed(2)} s</span>}
+        {state.phase === 'done' && (
+          <span>
+            {nf.format(state.loaded)} rows · {selected.length} series
+            {span && <> · <span title={`${new Date(span.min).toLocaleString()} – ${new Date(span.max).toLocaleString()}`}>{span.text}</span></>}
+            {' '}in {(state.elapsedMs / 1000).toFixed(2)} s
+          </span>
+        )}
         {state.phase === 'done' && range.to == null && (
           <span><span className={`dot${state.liveConnected ? ' live' : ''}`} />{state.liveConnected ? `Live · ${nf.format(state.liveCount)} new` : 'Live off'}</span>
         )}
