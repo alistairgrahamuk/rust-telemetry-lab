@@ -65,14 +65,25 @@ export function useReadings(idsKey: string, fromMs: number | null, toMs: number 
 
   const ids = idsKey ? idsKey.split(',').map(Number) : []
 
+  const seriesFor = (sid: number) => {
+    let ser = series.current.get(sid)
+    if (!ser) { ser = new Series(); series.current.set(sid, ser) }
+    return ser
+  }
+  /** Live batches arrive as small arrays of tuples. */
   const append = (batch: Reading[]) => {
-    const m = series.current
-    for (const [sid, ts, v] of batch) {
-      let ser = m.get(sid)
-      if (!ser) { ser = new Series(); m.set(sid, ser) }
-      ser.push(ts, v)
-    }
+    for (const [sid, ts, v] of batch) seriesFor(sid).push(ts, v)
     loaded.current += batch.length
+  }
+  /** History batches arrive from the worker as flat (sid, ts, value) triples. */
+  const appendFlat = (buf: Float64Array, n: number) => {
+    let last: Series | null = null, lastSid = -1
+    for (let i = 0; i < n; i++) {
+      const sid = buf[i * 3]
+      if (sid !== lastSid) { last = seriesFor(sid); lastSid = sid }
+      last!.push(buf[i * 3 + 1], buf[i * 3 + 2])
+    }
+    loaded.current += n
   }
 
   // Coalesce many onRows calls into at most one setState per RENDER_EVERY_MS.
@@ -107,9 +118,9 @@ export function useReadings(idsKey: string, fromMs: number | null, toMs: number 
 
     streamReadings(ids, fromMs, toMs, {
       onMeta: (m) => scheduleFlush({ expected: m.count }),
-      onRows: (batch) => {
-        append(batch)
-        bytes += batch.length * 24 // ~bytes per NDJSON row, good enough for a rate readout
+      onRows: (buf, n) => {
+        appendFlat(buf, n)
+        bytes += n * 24 // ~bytes per NDJSON row, good enough for a rate readout
         scheduleFlush({ bytesHint: bytes, elapsedMs: performance.now() - started })
       },
     }, ctrl.signal)

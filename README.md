@@ -81,8 +81,8 @@ MODE=live docker compose --profile generate up -d
 
 Each sensor in the list is streamed as its own index-ordered cursor, back to back. One
 sensor's full history (~300k rows) streams in about 0.2 s; eight sensors (2.4 M rows, 60 MB)
-start within 150 ms and finish in about 2 s uncompressed or 4.6 s as 11.6 MB gzip. Timestamps
-are whole milliseconds end to end.
+start within 150 ms and finish in about 2 s, compressed with zstd (10.9 MB) or gzip at the
+fastest level. Timestamps are whole milliseconds end to end.
 
 ### Why the table is written sensor-major
 
@@ -96,10 +96,12 @@ readings_pkey` restores the layout.
 
 ## Front end (`web/`)
 
-Vite + React + TypeScript + Apache ECharts. Series are kept as flat typed arrays and handed
-to ECharts without copying; while rows stream, chart refreshes are paced by how long the last
-one took, so a 2.4 M-point load never blocks the page for more than ~0.3 s. A device ×
-metric picker selects up to 8 sensors;
+Vite + React + TypeScript + Apache ECharts. A Web Worker fetches and parses the NDJSON
+stream byte by byte and posts rows back as transferable typed arrays; series are kept as flat
+typed arrays and handed to ECharts without copying; while rows stream, chart refreshes are
+paced by how long the last one took. Eight sensors over all time (2.4 M points) load in about
+2.3 s and never block the page for more than ~0.3 s. A device × metric picker selects up to 8
+sensors;
 each keeps a fixed colour while selected. Sensors are grouped into one panel per unit (so
 different units never share an axis) with a shared crosshair, legend and zoom, LTTB
 downsampling for large ranges, presets anchored to the newest selected reading, a typed custom

@@ -110,6 +110,7 @@ button:hover { border-color: var(--muted); }
 .chip-x { border: 0; background: transparent; padding: 0 4px; line-height: 1; color: var(--muted); font-size: 15px; }
 .chip-x:hover { color: var(--text); }
 .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 3px; flex: none; margin-right: 2px; }
+td .swatch { margin-right: 6px; vertical-align: -1px; }
 
 .status { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; color: var(--text-2); min-height: 22px; font-variant-numeric: tabular-nums; }
 .progress { flex: 1 1 160px; max-width: 320px; height: 6px; background: var(--grid); border-radius: 3px; overflow: hidden; }

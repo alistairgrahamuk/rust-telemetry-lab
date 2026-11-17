@@ -27,7 +27,11 @@ use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use std::{convert::Infallible, io::Write, net::SocketAddr, path::PathBuf, time::Duration};
-use tower_http::{compression::CompressionLayer, services::ServeDir, trace::TraceLayer};
+use tower_http::{
+    compression::{CompressionLayer, CompressionLevel},
+    services::ServeDir,
+    trace::TraceLayer,
+};
 use tracing::{error, info};
 
 type Row = (i16, DateTime<Utc>, f32);
@@ -284,9 +288,11 @@ async fn main() -> Result<()> {
         .route("/api/health", get(|| async { "ok" }))
         // SPA: unknown paths fall back to index.html so client-side routes work.
         .fallback_service(ServeDir::new(&static_dir).fallback(tower_http::services::ServeFile::new(index)))
-        // Default level: measured ~15% overhead on a 60 MB stream; "Fastest" was 2x slower
-        // end to end in testing. Skips text/event-stream by default.
-        .layer(CompressionLayer::new())
+        // Fastest level, zstd preferred (every current browser accepts it), gzip as fallback.
+        // Measured on a 60 MB / 2.4 M-row stream: plain 1.9 s, zstd 1.95 s (10.9 MB), gzip
+        // level 1 1.96 s (15.4 MB); the default gzip level took 4.6 s and was the bottleneck
+        // for the browser. Skips text/event-stream by default.
+        .layer(CompressionLayer::new().zstd(true).gzip(true).quality(CompressionLevel::Fastest))
         .layer(TraceLayer::new_for_http())
         .with_state(AppState { pool });
 

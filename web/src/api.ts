@@ -12,6 +12,8 @@ export interface Sensor {
 /** [sensor_id, timestamp_ms, value] */
 export type Reading = [number, number, number]
 
+import type { WorkerIn, WorkerOut } from './stream.worker'
+
 export interface StreamMeta {
   sensor_ids: number[]
   count: number
@@ -27,14 +29,16 @@ export async function fetchSensors(): Promise<Sensor[]> {
 
 export interface StreamHandlers {
   onMeta: (meta: StreamMeta) => void
-  onRows: (rows: Reading[]) => void
+  /** `buf` holds `n` triples (sensor_id, ts_ms, value) at stride 3; it is owned by the callee. */
+  onRows: (buf: Float64Array, n: number) => void
 }
 
 /**
- * Streams NDJSON rows for a set of sensors over a range, calling onRows for every network
- * chunk so the chart can render progressively. Resolves when the server closes the stream.
+ * Streams NDJSON rows for a set of sensors over a range. Fetching, decoding and parsing run
+ * in a Web Worker (see stream.worker.ts); parsed rows arrive here as transferred typed arrays
+ * so the main thread does no string work. Resolves when the server closes the stream.
  */
-export async function streamReadings(
+export function streamReadings(
   sensorIds: number[],
   fromMs: number | null,
   toMs: number | null,
@@ -44,44 +48,29 @@ export async function streamReadings(
   const params = new URLSearchParams({ sensor_ids: sensorIds.join(',') })
   if (fromMs != null) params.set('from', new Date(fromMs).toISOString())
   if (toMs != null) params.set('to', new Date(toMs).toISOString())
+  const url = new URL(`/api/readings/stream?${params}`, location.origin).href
 
-  const res = await fetch(`/api/readings/stream?${params}`, { signal })
-  if (!res.ok || !res.body) throw new Error(`stream: HTTP ${res.status} ${await res.text().catch(() => '')}`)
-
-  const reader = res.body.getReader()
-  const decoder = new TextDecoder()
-  let tail = ''
-
-  for (;;) {
-    const { value, done } = await reader.read()
-    if (done) break
-    tail += decoder.decode(value, { stream: true })
-    const lastNl = tail.lastIndexOf('\n')
-    if (lastNl < 0) continue
-    const complete = tail.slice(0, lastNl)
-    tail = tail.slice(lastNl + 1)
-
-    const rows: Reading[] = []
-    for (const line of complete.split('\n')) {
-      if (!line) continue
-      if (line.charCodeAt(0) === 123 /* '{' */) {
-        const obj = JSON.parse(line)
-        if (obj.type === 'meta') handlers.onMeta(obj)
-        continue
-      }
-      rows.push(parseRow(line))
+  return new Promise<void>((resolve, reject) => {
+    const worker = new Worker(new URL('./stream.worker.ts', import.meta.url), { type: 'module' })
+    const finish = (err?: Error) => {
+      worker.terminate()
+      signal.removeEventListener('abort', onAbort)
+      err ? reject(err) : resolve()
     }
-    if (rows.length) handlers.onRows(rows)
-  }
-  if (tail.trim()) handlers.onRows([parseRow(tail)])
-}
+    const onAbort = () => finish(new DOMException('aborted', 'AbortError'))
+    if (signal.aborted) return onAbort()
+    signal.addEventListener('abort', onAbort)
 
-/** Parses a `[sensor_id,ts_ms,value]` line; ~3x faster than JSON.parse over millions of rows. */
-function parseRow(line: string): Reading {
-  const c1 = line.indexOf(',')
-  const c2 = line.indexOf(',', c1 + 1)
-  const end = line.length - 1 // closing ']'
-  return [+line.slice(1, c1), +line.slice(c1 + 1, c2), +line.slice(c2 + 1, end)]
+    worker.onmessage = (e: MessageEvent<WorkerOut>) => {
+      const m = e.data
+      if (m.type === 'meta') handlers.onMeta(m.meta)
+      else if (m.type === 'rows') handlers.onRows(m.buf, m.n)
+      else if (m.type === 'done') finish()
+      else finish(new Error(m.message))
+    }
+    worker.onerror = (e) => finish(new Error(e.message || 'stream worker failed'))
+    worker.postMessage({ type: 'start', url } satisfies WorkerIn)
+  })
 }
 
 /** Subscribes to new rows after `afterMs` for a set of sensors via SSE. Returns a disposer. */
