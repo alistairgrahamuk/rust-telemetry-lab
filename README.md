@@ -224,3 +224,7 @@ docker-compose.yml      postgres + api, generator behind the `generate` profile
 - `readings(sensor_id, recorded_at, value)`
   - primary key `(sensor_id, recorded_at)`: one reading per sensor per instant, and serves per-sensor range queries
   - heap written sensor-major by the generator (see above); no time-only index
+
+## License
+
+MIT. See [LICENSE](LICENSE).
