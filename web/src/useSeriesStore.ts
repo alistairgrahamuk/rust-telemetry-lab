@@ -135,13 +135,16 @@ export function useSeriesStore(wantedKey: string, fromMs: number | null, toMs: n
   // Live tail: one subscription for the union, only while nothing is loading and the range is
   // open-ended. Rows older than a series' newest point are dropped, so overlap is harmless.
   useEffect(() => {
-    if (!live || !wanted.length || state.pending > 0 || toMs != null) return
-    let last = 0
-    for (const ser of series.current.values()) last = Math.max(last, ser.lastTs())
-    scheduleFlush({ liveConnected: true }, true)
+    // The ref, not the state: a stream started in this same commit has already bumped it.
+    if (!live || !wanted.length || state.pending > 0 || counters.current.pending > 0 || toMs != null) return
+    const newest = () => {
+      let last = 0
+      for (const ser of series.current.values()) last = Math.max(last, ser.lastTs())
+      return last || Date.now()
+    }
     const dispose = subscribeLive(
       wanted,
-      last || Date.now(),
+      newest,
       (batch: Reading[]) => {
         let added = 0
         for (const [sid, ts, v] of batch) {
@@ -153,9 +156,10 @@ export function useSeriesStore(wantedKey: string, fromMs: number | null, toMs: n
         counters.current.loaded += added
         scheduleFlush({})
       },
+      (connected) => scheduleFlush({ liveConnected: connected }, true),
       (msg) => scheduleFlush({ error: msg }),
     )
-    return () => { dispose(); scheduleFlush({ liveConnected: false }, true) }
+    return dispose
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [live, wantedKey, rangeKey, state.pending, scheduleFlush])
 

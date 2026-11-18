@@ -494,6 +494,12 @@ async fn write_range(
     Ok(inserted)
 }
 
+/// First grid tick strictly after `now`, on the grid `anchor + n * interval`.
+fn next_tick(anchor: DateTime<Utc>, now: DateTime<Utc>, interval: ChronoDuration) -> DateTime<Utc> {
+    let steps = ((now - anchor).num_seconds() / interval.num_seconds()).max(0);
+    anchor + interval * (steps as i32 + 1)
+}
+
 /// Catch up, then keep up. Finds the newest stored reading, resumes every sensor's walk from
 /// its last value, fills the gap to now (INSERT, so overlap with existing rows is harmless),
 /// then writes one reading per sensor at each tick of the grid until stopped. Ticks continue
@@ -516,15 +522,13 @@ async fn run_catchup(cfg: &Config, pool: &PgPool, devices: &mut [DeviceState], r
             let written = write_range(cfg, pool, devices, rng, start, now, Writer::Insert).await?;
             info!(written, "caught up to now");
             // Grid continues from the newest reading, regardless of how far we just filled.
-            let steps = ((now - newest).num_seconds() / cfg.sample_interval.num_seconds()).max(0);
-            newest + cfg.sample_interval * (steps as i32 + 1)
+            next_tick(newest, now, cfg.sample_interval)
         }
         None => {
             let now = Utc::now();
             info!(start = %cfg.start, "readings table is empty: initial load from START_DATE to now");
             run_backfill(cfg, pool, devices, rng, cfg.start, now).await?;
-            let steps = ((now - cfg.start).num_seconds() / cfg.sample_interval.num_seconds()).max(0);
-            cfg.start + cfg.sample_interval * (steps as i32 + 1)
+            next_tick(cfg.start, now, cfg.sample_interval)
         }
     };
 
@@ -643,4 +647,113 @@ async fn main() -> Result<()> {
 
     pool.close().await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    fn utc(y: i32, mo: u32, d: u32, h: u32, mi: u32, s: u32) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(y, mo, d, h, mi, s).unwrap()
+    }
+
+    #[test]
+    fn parse_date_accepts_dates_and_rfc3339() {
+        assert_eq!(parse_date("2026-01-02").unwrap(), utc(2026, 1, 2, 0, 0, 0));
+        assert_eq!(parse_date(" 2026-01-02T03:04:05Z ").unwrap(), utc(2026, 1, 2, 3, 4, 5));
+        assert_eq!(
+            parse_date("2026-01-02T03:04:05+01:00").unwrap(),
+            utc(2026, 1, 2, 2, 4, 5)
+        );
+        assert!(parse_date("02/01/2026").is_err());
+        assert!(parse_date("").is_err());
+    }
+
+    #[test]
+    fn sensor_ids_are_dense_per_device() {
+        assert_eq!(sensor_id(1, 0), 1);
+        assert_eq!(sensor_id(1, 2), 3);
+        assert_eq!(sensor_id(2, 0), 4);
+        assert_eq!(sensor_id(50, 2), 150);
+    }
+
+    #[test]
+    fn next_tick_continues_the_grid() {
+        let five = ChronoDuration::seconds(300);
+        let anchor = utc(2026, 11, 16, 23, 55, 0);
+        // Mid-interval: the next grid point.
+        assert_eq!(
+            next_tick(anchor, utc(2026, 11, 18, 8, 39, 38), five),
+            utc(2026, 11, 18, 8, 40, 0)
+        );
+        // Exactly on a grid point: strictly after it.
+        assert_eq!(
+            next_tick(anchor, utc(2026, 11, 18, 8, 40, 0), five),
+            utc(2026, 11, 18, 8, 45, 0)
+        );
+        // Now before the anchor (clock skew): the first tick after the anchor.
+        assert_eq!(
+            next_tick(anchor, utc(2026, 11, 16, 0, 0, 0), five),
+            utc(2026, 11, 17, 0, 0, 0)
+        );
+    }
+
+    #[test]
+    fn copy_binary_encoding_matches_the_wire_format() {
+        let at = utc(2000, 1, 1, 0, 0, 1); // one second after the Postgres epoch
+        let bytes = encode_copy_binary(&[Reading {
+            sensor_id: 7,
+            at,
+            value: 1.5,
+        }]);
+        // 19-byte header, one row (2 + 3 * 4 + 2 + 8 + 4 = 28), 2-byte trailer.
+        assert_eq!(bytes.len(), 19 + 28 + 2);
+        assert_eq!(&bytes[..11], COPY_SIGNATURE);
+        assert_eq!(&bytes[19..21], &3i16.to_be_bytes()); // field count
+        assert_eq!(&bytes[25..27], &7i16.to_be_bytes()); // sensor id
+        assert_eq!(&bytes[31..39], &1_000_000i64.to_be_bytes()); // microseconds since 2000-01-01
+        assert_eq!(&bytes[43..47], &1.5f32.to_be_bytes());
+        assert_eq!(&bytes[47..49], &(-1i16).to_be_bytes()); // trailer
+    }
+
+    #[test]
+    fn resume_from_undoes_the_daily_cycle() {
+        let mut rng = StdRng::seed_from_u64(1);
+        let mut dev = DeviceState::new(3, &mut rng);
+        // Sample once at 15:00 UTC (peak of the cycle) and capture what was "stored".
+        let at = utc(2026, 6, 1, 15, 0, 0);
+        let mut out = Vec::new();
+        dev.sample(&mut rng, at, &mut out);
+        let (t, h, p) = (dev.temperature, dev.humidity, dev.pressure);
+        let last: Vec<LastReading> = out
+            .iter()
+            .map(|r| LastReading {
+                sensor_id: r.sensor_id,
+                at: r.at,
+                value: r.value,
+            })
+            .collect();
+
+        // A fresh device state resumed from those rows should hold the same underlying walk.
+        let mut resumed = DeviceState::new(3, &mut rng);
+        resumed.resume_from(&last);
+        assert!(
+            (resumed.temperature - t).abs() < 1e-3,
+            "temperature {} vs {t}",
+            resumed.temperature
+        );
+        assert!(
+            (resumed.humidity - h).abs() < 1e-3,
+            "humidity {} vs {h}",
+            resumed.humidity
+        );
+        assert!((resumed.pressure - p).abs() < 1e-3);
+
+        // Rows for another device are ignored.
+        let mut other = DeviceState::new(4, &mut rng);
+        let before = other.temperature;
+        other.resume_from(&last);
+        assert_eq!(other.temperature, before);
+    }
 }

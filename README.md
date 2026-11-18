@@ -85,7 +85,8 @@ Open http://localhost:8080. The page is a **dashboard of chart widgets**:
 Rows stream in as NDJSON and the charts fill progressively. Each sensor is fetched once for
 the current range no matter how many widgets show it. With live tail on, each new 5-minute
 tick from the generator arrives over Server-Sent Events and is appended to every widget that
-shows that sensor.
+shows that sensor; the green dot means the stream is connected, and it reconnects on its own if
+the API restarts.
 
 ## Generator modes and settings
 
@@ -172,8 +173,8 @@ Vite + React + TypeScript + Apache ECharts + react-grid-layout.
   one stream per 16 sensors, only the missing sensors when a widget's selection changes, and a
   single live-tail subscription. Series are flat typed arrays (`series.ts`) mutated in place;
   a cheap version counter drives re-renders.
-- A Web Worker (`stream.worker.ts`) fetches and parses the NDJSON stream byte by byte and
-  posts rows back as transferable typed arrays; while rows stream, chart refreshes are paced by
+- A Web Worker (`stream.worker.ts`, parser in `rowParser.ts`) fetches and parses the NDJSON
+  stream byte by byte and posts rows back as transferable typed arrays; while rows stream, chart refreshes are paced by
   how long the last one took. Eight sensors over all time (2.4 M points) load in about 2.3 s
   and never block the page for more than ~0.3 s.
 - Presets anchor to the newest reading across the dashboard's sensors, so they always show
@@ -183,6 +184,15 @@ Vite + React + TypeScript + Apache ECharts + react-grid-layout.
 cd web && npm install
 npm run dev          # http://localhost:5173, /api proxied to the Rust API on :8080
 ```
+
+## Tests
+
+```sh
+cargo test --workspace        # generator: date parsing, COPY encoding, tick grid, walk resume; api: id parsing
+cd web && npm test            # vitest: NDJSON row parser (incl. mid-row flush), span formatting, widget placement, series
+```
+
+Formatting is pinned by `rustfmt.toml` (`cargo fmt --all -- --check`); clippy runs clean with `--all-targets`.
 
 ## Developing without Docker for the Rust side
 

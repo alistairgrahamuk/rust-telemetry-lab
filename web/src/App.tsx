@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import GridLayout, { useContainerWidth, verticalCompactor, type Layout } from 'react-grid-layout'
 import { fetchSensors, type Sensor } from './api'
+import { DAY, humanSpan } from './format'
 import { useSeriesStore } from './useSeriesStore'
 import Widget from './Widget'
 import {
@@ -8,29 +9,12 @@ import {
   emptyDashboard, loadDashboard, newId, placeNew, saveDashboard, widgetSensorIds,
 } from './dashboard'
 
-const DAY = 86_400_000
 const PRESETS: { label: string; days: number | null }[] = [
   { label: '24h', days: 1 }, { label: '7d', days: 7 }, { label: '30d', days: 30 },
   { label: '90d', days: 90 }, { label: '1y', days: 365 }, { label: 'All', days: null },
 ]
 
 const nf = new Intl.NumberFormat()
-
-const HOUR = 3_600_000, MONTH = 30.44 * DAY
-/** Approximate, readable span: "~45 minutes", "~6 hours 10 minutes", "~30 days", "~1 year", "~2 years 11 months". */
-function humanSpan(ms: number): string {
-  if (!(ms > 0)) return ''
-  const unit = (n: number, name: string) => `${n} ${name}${n === 1 ? '' : 's'}`
-  if (ms < HOUR) return `~${unit(Math.max(1, Math.round(ms / 60_000)), 'minute')}`
-  if (ms < 3 * DAY) {
-    const h = Math.floor(ms / HOUR), m = Math.round((ms - h * HOUR) / 60_000)
-    return `~${unit(h, 'hour')}${m ? ' ' + unit(m, 'minute') : ''}`
-  }
-  if (ms < 4 * MONTH) return `~${unit(Math.round(ms / DAY), 'day')}`
-  const months = Math.round(ms / MONTH)
-  const y = Math.floor(months / 12), m = months % 12
-  return `~${[y ? unit(y, 'year') : '', m ? unit(m, 'month') : ''].filter(Boolean).join(' ')}`
-}
 
 export default function App() {
   const [sensors, setSensors] = useState<Sensor[]>([])
@@ -110,7 +94,7 @@ export default function App() {
           </span>
         )}
         {!streaming && wantedIds.length > 0 && (
-          <span><span className={`dot${state.liveConnected ? ' live' : ''}`} />{state.liveConnected ? `Live · ${nf.format(state.liveCount)} new` : 'Live off'}</span>
+          <span><span className={`dot${state.liveConnected ? ' live' : ''}`} />{state.liveConnected ? `Live · ${nf.format(state.liveCount)} new` : dash.live ? 'Live · connecting…' : 'Live off'}</span>
         )}
         {(state.error || loadError) && <span className="error">{state.error ?? loadError}</span>}
         </div>

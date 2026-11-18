@@ -73,20 +73,46 @@ export function streamReadings(
   })
 }
 
-/** Subscribes to new rows after `afterMs` for a set of sensors via SSE. Returns a disposer. */
+/** Delay before re-opening a live subscription the browser gave up on. */
+const LIVE_RETRY_MS = 3_000
+
+/**
+ * Subscribes to new rows for a set of sensors via SSE. `getAfter` is asked for the newest
+ * timestamp already held each time a connection is (re)opened, so nothing is missed or
+ * re-sent across reconnects. The browser retries transient network errors itself, but gives
+ * up for good on a non-stream response (e.g. a 502 from a dev proxy while the API restarts),
+ * so a closed source is re-created here. `onState` reports the real connection state.
+ */
 export function subscribeLive(
   sensorIds: number[],
-  afterMs: number,
+  getAfter: () => number,
   onRows: (rows: Reading[]) => void,
+  onState: (connected: boolean) => void,
   onError: (msg: string) => void,
 ): () => void {
-  const params = new URLSearchParams({ sensor_ids: sensorIds.join(','), after: new Date(afterMs).toISOString() })
-  const es = new EventSource(`/api/readings/live?${params}`)
-  es.addEventListener('rows', (e) => onRows(JSON.parse((e as MessageEvent).data)))
-  es.addEventListener('error', (e) => {
-    const data = (e as MessageEvent).data
-    if (data) onError(String(data))
-    // Connection-level errors: EventSource reconnects on its own.
-  })
-  return () => es.close()
+  let es: EventSource | null = null
+  let timer: number | null = null
+  let disposed = false
+
+  const open = () => {
+    const params = new URLSearchParams({ sensor_ids: sensorIds.join(','), after: new Date(getAfter()).toISOString() })
+    es = new EventSource(`/api/readings/live?${params}`)
+    es.addEventListener('open', () => onState(true))
+    es.addEventListener('rows', (e) => onRows(JSON.parse((e as MessageEvent).data)))
+    es.addEventListener('error', (e) => {
+      const data = (e as MessageEvent).data
+      if (data) onError(String(data))
+      onState(false)
+      if (es?.readyState === EventSource.CLOSED && !disposed && timer == null) {
+        timer = window.setTimeout(() => { timer = null; open() }, LIVE_RETRY_MS)
+      }
+    })
+  }
+  open()
+  return () => {
+    disposed = true
+    if (timer != null) window.clearTimeout(timer)
+    es?.close()
+    onState(false)
+  }
 }

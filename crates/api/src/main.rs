@@ -259,6 +259,7 @@ async fn live_readings(
     Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))))
 }
 
+#[derive(Debug)]
 struct ApiError(StatusCode, anyhow::Error);
 
 impl ApiError {
@@ -325,4 +326,32 @@ async fn main() -> Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_ids_sorts_dedups_and_trims() {
+        assert_eq!(parse_ids("4, 1,1,,3").unwrap(), vec![1, 3, 4]);
+    }
+
+    #[test]
+    fn parse_ids_rejects_bad_input() {
+        assert!(parse_ids("").is_err());
+        assert!(parse_ids(" , ").is_err());
+        assert!(parse_ids("1,abc").is_err());
+        assert!(parse_ids("99999").is_err()); // does not fit i16
+        let too_many = (1..=MAX_SENSORS_PER_REQUEST as i16 + 1)
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        assert!(parse_ids(&too_many).is_err());
+        let just_enough = (1..=MAX_SENSORS_PER_REQUEST as i16)
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        assert_eq!(parse_ids(&just_enough).unwrap().len(), MAX_SENSORS_PER_REQUEST);
+    }
 }

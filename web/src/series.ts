@@ -22,6 +22,17 @@ export class Series {
   ts(i: number) { return this.buf[i * 2] }
   value(i: number) { return this.buf[i * 2 + 1] }
   lastTs() { return this.len ? this.buf[(this.len - 1) * 2] : 0 }
+
+  /** Index of the point whose timestamp is closest to `t` (points are time-ordered). */
+  nearestIndex(t: number): number {
+    let lo = 0, hi = this.len - 1
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1
+      if (this.ts(mid) < t) lo = mid + 1
+      else hi = mid
+    }
+    return lo > 0 && t - this.ts(lo - 1) < this.ts(lo) - t ? lo - 1 : lo
+  }
 }
 
 export type SeriesMap = Map<number, Series>

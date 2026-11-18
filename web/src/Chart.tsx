@@ -4,7 +4,7 @@ import { LineChart } from 'echarts/charts'
 import { DataZoomComponent, GridComponent, LegendComponent, TitleComponent, TooltipComponent } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
 import type { Sensor } from './api'
-import type { Series, SeriesMap } from './series'
+import type { SeriesMap } from './series'
 
 echarts.use([LineChart, GridComponent, TooltipComponent, DataZoomComponent, TitleComponent, LegendComponent, CanvasRenderer])
 
@@ -27,17 +27,6 @@ function fmtTime(ms: number) {
   return new Date(ms).toLocaleString(undefined, {
     year: 'numeric', month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit',
   })
-}
-
-/** Index of the point whose timestamp is closest to `t` (series are time-ordered). */
-function nearestIndex(ser: Series, t: number): number {
-  let lo = 0, hi = ser.len - 1
-  while (lo < hi) {
-    const mid = (lo + hi) >> 1
-    if (ser.ts(mid) < t) lo = mid + 1
-    else hi = mid
-  }
-  return lo > 0 && t - ser.ts(lo - 1) < ser.ts(lo) - t ? lo - 1 : lo
 }
 
 export interface Selected {
@@ -144,7 +133,7 @@ export default function Chart({ series, version, selected, streaming }: Props) {
           for (const it of order) {
             const ser = series.current?.get(it.sensor.id)
             if (!ser || !ser.len) continue
-            const i = nearestIndex(ser, t)
+            const i = ser.nearestIndex(t)
             // Skip series with no reading near this instant (more than two typical gaps away).
             const gap = ser.len > 1 ? (ser.lastTs() - ser.ts(0)) / (ser.len - 1) : Infinity
             if (Math.abs(ser.ts(i) - t) > 2 * gap) continue
