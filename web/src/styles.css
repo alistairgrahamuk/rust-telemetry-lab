@@ -110,7 +110,6 @@ button:hover { border-color: var(--muted); }
 .chip-x { border: 0; background: transparent; padding: 0 4px; line-height: 1; color: var(--muted); font-size: 15px; }
 .chip-x:hover { color: var(--text); }
 .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 3px; flex: none; margin-right: 2px; }
-td .swatch { margin-right: 6px; vertical-align: -1px; }
 
 .status { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; color: var(--text-2); min-height: 22px; font-variant-numeric: tabular-nums; }
 .progress { flex: 1 1 160px; max-width: 320px; height: 6px; background: var(--grid); border-radius: 3px; overflow: hidden; }
@@ -121,12 +120,6 @@ td .swatch { margin-right: 6px; vertical-align: -1px; }
 
 .chart-card { flex: 1 1 auto; min-height: 420px; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; position: relative; }
 .chart { position: absolute; inset: 0; }
-
-.table-wrap { max-height: 260px; overflow: auto; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; }
-table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
-th, td { text-align: right; padding: 4px 10px; border-bottom: 1px solid var(--grid); white-space: nowrap; }
-th:first-child, td:first-child { text-align: left; }
-th { position: sticky; top: 0; background: var(--surface); color: var(--text-2); font-weight: 600; }
 
 @media (max-width: 640px) {
   .app { padding: 10px 16px; }

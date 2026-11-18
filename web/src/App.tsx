@@ -64,7 +64,6 @@ export default function App() {
   const [draft, setDraft] = useState({ from: '', to: '' })
   const [draftError, setDraftError] = useState<string | null>(null)
   const [live, setLive] = useState(true)
-  const [showTable, setShowTable] = useState(false)
   const [loadError, setLoadError] = useState<string | null>(null)
   const pickerRef = useRef<HTMLDivElement>(null)
 
@@ -162,19 +161,6 @@ export default function App() {
   const pct = state.expected ? Math.min(100, (state.loaded / state.expected) * 100) : 0
   const mbps = state.elapsedMs > 0 ? (state.bytesHint / 1_048_576) / (state.elapsedMs / 1000) : 0
 
-  // Table view: newest 50 rows across the selected sensors.
-  const latest = useMemo(() => {
-    if (!showTable) return []
-    const rows: { ts: number; s: Sensor; v: number }[] = []
-    for (const it of selected) {
-      const ser = series.current.get(it.sensor.id)
-      if (!ser) continue
-      for (let i = Math.max(0, ser.len - 50); i < ser.len; i++) rows.push({ ts: ser.ts(i), s: it.sensor, v: ser.value(i) })
-    }
-    return rows.sort((a, b) => b.ts - a.ts || a.s.id - b.s.id).slice(0, 50)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [showTable, selected, state.version])
-
   return (
     <div className="app">
       <div className="toolbar">
@@ -237,7 +223,6 @@ export default function App() {
           <button onClick={applyCustom} disabled={!draft.from || !draft.to}>Apply</button>
         </span>
         <label className="toggle"><input type="checkbox" checked={live} onChange={(e) => setLive(e.target.checked)} /> Live tail</label>
-        <label className="toggle"><input type="checkbox" checked={showTable} onChange={(e) => setShowTable(e.target.checked)} /> Table</label>
       </div>
 
       <div className="status" aria-live="polite">
@@ -264,23 +249,6 @@ export default function App() {
       <div className="chart-card">
         <Chart series={series} version={state.version} selected={selected} streaming={state.phase === 'streaming'} />
       </div>
-
-      {showTable && (
-        <div className="table-wrap">
-          <table>
-            <thead><tr><th>Time</th><th>Sensor</th><th>Value</th></tr></thead>
-            <tbody>
-              {latest.map((r) => (
-                <tr key={`${r.s.id}-${r.ts}`}>
-                  <td>{new Date(r.ts).toLocaleString()}</td>
-                  <td><span className="swatch" style={{ background: `var(--series-${slots.get(r.s.id)! + 1})` }} />{seriesName(r.s)}</td>
-                  <td>{r.v.toFixed(1)} {r.s.unit}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
     </div>
   )
 }

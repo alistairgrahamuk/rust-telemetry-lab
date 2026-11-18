@@ -159,7 +159,7 @@ paced by how long the last one took. Eight sensors over all time (2.4 M points) 
 sensors; each keeps a fixed colour while selected. Sensors are grouped into one panel per unit
 (so different units never share an axis) with a shared crosshair, legend and zoom, LTTB
 downsampling for large ranges, presets anchored to the newest selected reading, a typed custom
-range (`YYYY-MM-DD HH:MM`, local time), a live-tail toggle and a table view. Light and dark
+range (`YYYY-MM-DD HH:MM`, local time) and a live-tail toggle. Light and dark
 follow the OS.
 
 ```sh
