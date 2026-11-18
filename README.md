@@ -145,7 +145,7 @@ revalidates the whole table. The initial load on an empty table takes the backfi
 |---|---|
 | `GET /api/sensors` | every sensor (device channel) with device, location, metric, unit and `first_ms`/`last_ms` |
 | `GET /api/readings/stream?sensor_ids=1,4,7&from=&to=` | NDJSON: a `{"type":"meta","count":N,...}` line, then `[sensor_id, ts_ms, value]` per row, ordered by sensor then time, streamed from a server-side cursor and gzip/zstd-compressed when accepted. `from`/`to` are RFC 3339; `to` is exclusive and both are optional. Up to 16 sensors per request. |
-| `GET /api/readings/live?sensor_ids=1,4&after=` | SSE `rows` events with batches of `[sensor_id, ts_ms, value]` newer than `after` (polled every second) |
+| `GET /api/readings/live?sensor_ids=1,4&after=` | SSE `rows` events with batches of `[sensor_id, ts_ms, value]` newer than `after` (polled every second). Up to 512 sensors, so one subscription covers a whole dashboard. |
 
 Each sensor in the list is streamed as its own index-ordered cursor, back to back. One
 sensor's full history (~300k rows) streams in about 0.2 s; eight sensors (2.4 M rows, 60 MB)

@@ -73,8 +73,9 @@ export function streamReadings(
   })
 }
 
-/** Delay before re-opening a live subscription the browser gave up on. */
+/** Delay before re-opening a live subscription the browser gave up on; doubles while it keeps failing. */
 const LIVE_RETRY_MS = 3_000
+const LIVE_RETRY_MAX_MS = 60_000
 
 /**
  * Subscribes to new rows for a set of sensors via SSE. `getAfter` is asked for the newest
@@ -93,18 +94,20 @@ export function subscribeLive(
   let es: EventSource | null = null
   let timer: number | null = null
   let disposed = false
+  let retry = LIVE_RETRY_MS
 
   const open = () => {
     const params = new URLSearchParams({ sensor_ids: sensorIds.join(','), after: new Date(getAfter()).toISOString() })
     es = new EventSource(`/api/readings/live?${params}`)
-    es.addEventListener('open', () => onState(true))
+    es.addEventListener('open', () => { retry = LIVE_RETRY_MS; onState(true) })
     es.addEventListener('rows', (e) => onRows(JSON.parse((e as MessageEvent).data)))
     es.addEventListener('error', (e) => {
       const data = (e as MessageEvent).data
       if (data) onError(String(data))
       onState(false)
       if (es?.readyState === EventSource.CLOSED && !disposed && timer == null) {
-        timer = window.setTimeout(() => { timer = null; open() }, LIVE_RETRY_MS)
+        timer = window.setTimeout(() => { timer = null; open() }, retry)
+        retry = Math.min(LIVE_RETRY_MAX_MS, retry * 2)
       }
     })
   }

@@ -41,6 +41,8 @@ const CHUNK_BYTES: usize = 64 * 1024;
 const LIVE_POLL: Duration = Duration::from_secs(1);
 const LIVE_BATCH_LIMIT: i64 = 50_000;
 const MAX_SENSORS_PER_REQUEST: usize = 16;
+/// The live poll is one indexed query however many sensors it covers, so it takes a whole dashboard.
+const MAX_LIVE_SENSORS: usize = 512;
 
 #[derive(Clone)]
 struct AppState {
@@ -97,7 +99,7 @@ async fn sensors(State(st): State<AppState>) -> Result<Json<Vec<Sensor>>, ApiErr
 }
 
 /// Comma-separated sensor ids, validated and de-duplicated.
-fn parse_ids(raw: &str) -> Result<Vec<i16>, ApiError> {
+fn parse_ids(raw: &str, max: usize) -> Result<Vec<i16>, ApiError> {
     let mut ids: Vec<i16> = raw
         .split(',')
         .filter(|s| !s.trim().is_empty())
@@ -112,10 +114,8 @@ fn parse_ids(raw: &str) -> Result<Vec<i16>, ApiError> {
     if ids.is_empty() {
         return Err(ApiError::bad_request("sensor_ids is required".into()));
     }
-    if ids.len() > MAX_SENSORS_PER_REQUEST {
-        return Err(ApiError::bad_request(format!(
-            "at most {MAX_SENSORS_PER_REQUEST} sensors per request"
-        )));
+    if ids.len() > max {
+        return Err(ApiError::bad_request(format!("at most {max} sensors per request")));
     }
     Ok(ids)
 }
@@ -132,7 +132,7 @@ fn write_row(buf: &mut Vec<u8>, (sid, ts, v): Row) {
 }
 
 async fn stream_readings(State(st): State<AppState>, Query(q): Query<RangeQuery>) -> Result<Response, ApiError> {
-    let ids = parse_ids(&q.sensor_ids)?;
+    let ids = parse_ids(&q.sensor_ids, MAX_SENSORS_PER_REQUEST)?;
     // chrono's MIN/MAX overflow Postgres' timestamptz range; use epoch..9999-12-31.
     let from = q.from.unwrap_or_else(|| DateTime::from_timestamp(0, 0).unwrap());
     let to =
@@ -216,7 +216,7 @@ async fn live_readings(
     State(st): State<AppState>,
     Query(q): Query<LiveQuery>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
-    let ids = parse_ids(&q.sensor_ids)?;
+    let ids = parse_ids(&q.sensor_ids, MAX_LIVE_SENSORS)?;
     let pool = st.pool.clone();
     let mut after = q.after.unwrap_or_else(Utc::now);
 
@@ -334,24 +334,28 @@ mod tests {
 
     #[test]
     fn parse_ids_sorts_dedups_and_trims() {
-        assert_eq!(parse_ids("4, 1,1,,3").unwrap(), vec![1, 3, 4]);
+        assert_eq!(parse_ids("4, 1,1,,3", 16).unwrap(), vec![1, 3, 4]);
     }
 
     #[test]
     fn parse_ids_rejects_bad_input() {
-        assert!(parse_ids("").is_err());
-        assert!(parse_ids(" , ").is_err());
-        assert!(parse_ids("1,abc").is_err());
-        assert!(parse_ids("99999").is_err()); // does not fit i16
+        assert!(parse_ids("", 16).is_err());
+        assert!(parse_ids(" , ", 16).is_err());
+        assert!(parse_ids("1,abc", 16).is_err());
+        assert!(parse_ids("99999", 16).is_err()); // does not fit i16
         let too_many = (1..=MAX_SENSORS_PER_REQUEST as i16 + 1)
             .map(|i| i.to_string())
             .collect::<Vec<_>>()
             .join(",");
-        assert!(parse_ids(&too_many).is_err());
+        assert!(parse_ids(&too_many, MAX_SENSORS_PER_REQUEST).is_err());
+        assert!(parse_ids(&too_many, MAX_LIVE_SENSORS).is_ok()); // the live cap is wider
         let just_enough = (1..=MAX_SENSORS_PER_REQUEST as i16)
             .map(|i| i.to_string())
             .collect::<Vec<_>>()
             .join(",");
-        assert_eq!(parse_ids(&just_enough).unwrap().len(), MAX_SENSORS_PER_REQUEST);
+        assert_eq!(
+            parse_ids(&just_enough, MAX_SENSORS_PER_REQUEST).unwrap().len(),
+            MAX_SENSORS_PER_REQUEST
+        );
     }
 }
