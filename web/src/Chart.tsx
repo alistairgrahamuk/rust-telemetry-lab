@@ -4,12 +4,16 @@ import { LineChart } from 'echarts/charts'
 import { DataZoomComponent, GridComponent, LegendComponent, TitleComponent, TooltipComponent } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
 import type { Sensor } from './api'
-import type { SeriesMap } from './useReadings'
+import type { SeriesMap } from './series'
 
 echarts.use([LineChart, GridComponent, TooltipComponent, DataZoomComponent, TitleComponent, LegendComponent, CanvasRenderer])
 
 /** Fixed slot order; a sensor keeps its slot for as long as it is selected. */
 export const SLOT_COUNT = 8
+/** All charts join this group so crosshair and zoom stay in step across widgets. */
+const GROUP = 'dashboard'
+/** Below this height the zoom slider is dropped so the panels keep room to breathe. */
+const COMPACT_BELOW_PX = 300
 
 /** Panels are ordered by metric so the layout is predictable; unknown metrics go last. */
 const METRIC_ORDER = ['temperature', 'humidity', 'pressure']
@@ -93,25 +97,30 @@ export default function Chart({ series, version, selected, streaming }: Props) {
 
   const buildOption = () => {
     const ink = cssVar('--text'), ink2 = cssVar('--text-2'), muted = cssVar('--muted'), grid = cssVar('--grid'), axis = cssVar('--axis'), surface = cssVar('--surface')
+    const H = el.current?.clientHeight || 400
+    const compact = H < COMPACT_BELOW_PX
     const n = Math.max(panels.length, 1)
-    const legendH = order.length > 1 ? 7 : 0        // % of height reserved for the legend row
-    const top = 4 + legendH, bottom = 12             // % reserved above (titles/legend) and below (zoom slider)
-    const span = (100 - top - bottom) / n
-    const gridFor = (i: number) => ({ top: `${top + i * span + 4}%`, height: `${span - 8}%`, left: 64, right: 24 })
+    // Pixel layout so small widgets stay usable: legend row, per-panel title, x labels, slider.
+    const legendH = order.length > 1 ? 26 : 0
+    const titleH = 20
+    const top = 6 + legendH
+    const bottom = compact ? 28 : 64
+    const span = Math.max(40, (H - top - bottom) / n)
+    const gridFor = (i: number) => ({ top: top + i * span + titleH, height: Math.max(20, span - titleH - 8), left: 56, right: 16 })
 
     return {
       animation: false,
       backgroundColor: 'transparent',
       textStyle: { fontFamily: 'system-ui, -apple-system, "Segoe UI", sans-serif' },
       legend: {
-        show: order.length > 1, top: 6, left: 64, right: 24, type: 'scroll',
+        show: order.length > 1, top: 4, left: 56, right: 16, type: 'scroll',
         icon: 'roundRect', itemWidth: 14, itemHeight: 4,
         textStyle: { color: ink2, fontSize: 12 },
         data: order.map((it) => seriesName(it.sensor)),
       },
       title: panels.map((p, i) => ({
-        text: p.title, left: 64, top: `${top + i * span - 0.5}%`,
-        textStyle: { fontSize: 13, fontWeight: 600, color: ink2 },
+        text: p.title, left: 56, top: top + i * span - 2,
+        textStyle: { fontSize: 12, fontWeight: 600, color: ink2 },
       })),
       axisPointer: { link: [{ xAxisIndex: 'all' }], lineStyle: { color: muted }, label: { backgroundColor: ink2 } },
       tooltip: {
@@ -119,8 +128,7 @@ export default function Chart({ series, version, selected, streaming }: Props) {
         formatter: (params: unknown) => {
           const ps = params as { seriesIndex: number; seriesName: string; value: [number, number]; marker: string }[]
           if (!ps.length) return ''
-          const unit = order[ps[0].seriesIndex]?.sensor.unit ?? ''
-          const lines = ps.map((p) => `${p.marker} ${p.seriesName}: <b>${p.value[1].toFixed(1)} ${unit}</b>`)
+          const lines = ps.map((p) => `${p.marker} ${p.seriesName}: <b>${p.value[1].toFixed(1)} ${order[p.seriesIndex]?.sensor.unit ?? ''}</b>`)
           return `${fmtTime(ps[0].value[0])}<br/>${lines.join('<br/>')}`
         },
       },
@@ -133,15 +141,15 @@ export default function Chart({ series, version, selected, streaming }: Props) {
       })),
       yAxis: panels.map((_, i) => ({
         type: 'value', gridIndex: i, scale: true,
-        axisLabel: { color: muted }, splitLine: { lineStyle: { color: grid } }, splitNumber: 3,
+        axisLabel: { color: muted, hideOverlap: true }, splitLine: { lineStyle: { color: grid } }, splitNumber: compact ? 2 : 3,
       })),
       dataZoom: [
-        { type: 'inside', xAxisIndex: panels.map((_, i) => i), filterMode: 'filter' },
-        {
-          type: 'slider', xAxisIndex: panels.map((_, i) => i), bottom: 8, height: 22, left: 64, right: 24,
+        { id: 'zoom-inside', type: 'inside', xAxisIndex: panels.map((_, i) => i), filterMode: 'filter' },
+        ...(compact ? [] : [{
+          id: 'zoom-slider', type: 'slider', xAxisIndex: panels.map((_, i) => i), bottom: 8, height: 22, left: 56, right: 16,
           borderColor: axis, fillerColor: 'rgba(42,120,214,0.12)', handleStyle: { color: surface, borderColor: muted },
           textStyle: { color: muted }, dataBackground: { lineStyle: { color: axis }, areaStyle: { color: grid } },
-        },
+        }]),
       ],
       series: panels.flatMap((p, gi) => p.items.map((it) => ({
         name: seriesName(it.sensor), type: 'line', xAxisIndex: gi, yAxisIndex: gi,
@@ -156,10 +164,18 @@ export default function Chart({ series, version, selected, streaming }: Props) {
     }
   }
 
+  // Latest builder for the resize observer, which is registered once.
+  const buildRef = useRef(buildOption)
+  buildRef.current = buildOption
+
   // Create once; rebuild the whole option when the panel structure or theme changes.
   useEffect(() => {
     if (!el.current) return
-    if (!chart.current) chart.current = echarts.init(el.current, undefined, { renderer: 'canvas' })
+    if (!chart.current) {
+      chart.current = echarts.init(el.current, undefined, { renderer: 'canvas' })
+      chart.current.group = GROUP
+      echarts.connect(GROUP)
+    }
     chart.current.setOption(buildOption(), { notMerge: true })
     const mq = window.matchMedia('(prefers-color-scheme: dark)')
     const onTheme = () => chart.current?.setOption(buildOption(), { notMerge: true })
@@ -168,9 +184,16 @@ export default function Chart({ series, version, selected, streaming }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [structureKey])
 
+  // Resize with the widget; the layout is in pixels, so re-run the option on every size change.
   useEffect(() => {
     if (!el.current) return
-    const ro = new ResizeObserver(() => chart.current?.resize())
+    let lastH = el.current.clientHeight
+    const ro = new ResizeObserver(() => {
+      const c = chart.current
+      if (!c || !el.current) return
+      c.resize()
+      if (el.current.clientHeight !== lastH) { lastH = el.current.clientHeight; c.setOption(buildRef.current(), { notMerge: true }) }
+    })
     ro.observe(el.current)
     return () => { ro.disconnect(); chart.current?.dispose(); chart.current = null }
   }, [])

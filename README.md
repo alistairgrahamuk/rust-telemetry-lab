@@ -70,10 +70,22 @@ PGPASSWORD=telemetry psql -h 127.0.0.1 -p 5433 -U telemetry -d telemetry \
 
 ## Using the UI
 
-Open http://localhost:8080. Pick up to 8 sensors (any device, any metric) and a range; rows
-stream in as NDJSON and the chart fills progressively, one panel per unit with the selected
-sensors overlaid. With the live-tail toggle on, each new 5-minute tick from the generator
-arrives over Server-Sent Events and is appended to the chart.
+Open http://localhost:8080. The page is a **dashboard of chart widgets**:
+
+- **Add widget** puts a new card in the first free space. Each widget has its own sensor
+  picker (any device, any metric, one sensor or up to 8), a title you can type, and a remove
+  button. Drag a widget by its header; resize it from the bottom-right corner.
+- **The dashboard owns the time range.** Presets (24h to All), a typed custom range and the
+  live-tail toggle apply to every widget. Crosshair and zoom are linked across widgets.
+- Inside a widget, sensors are grouped into one panel per unit so different units never share
+  an axis. Small widgets drop the zoom slider; the mouse wheel still zooms.
+- The layout, every widget's sensors and the chosen range are saved in the browser
+  (`localStorage`), so a reload brings the same dashboard back.
+
+Rows stream in as NDJSON and the charts fill progressively. Each sensor is fetched once for
+the current range no matter how many widgets show it. With live tail on, each new 5-minute
+tick from the generator arrives over Server-Sent Events and is appended to every widget that
+shows that sensor.
 
 ## Generator modes and settings
 
@@ -151,16 +163,21 @@ layout.
 
 ## Front end (`web/`)
 
-Vite + React + TypeScript + Apache ECharts. A Web Worker fetches and parses the NDJSON
-stream byte by byte and posts rows back as transferable typed arrays; series are kept as flat
-typed arrays and handed to ECharts without copying; while rows stream, chart refreshes are
-paced by how long the last one took. Eight sensors over all time (2.4 M points) load in about
-2.3 s and never block the page for more than ~0.3 s. A device × metric picker selects up to 8
-sensors; each keeps a fixed colour while selected. Sensors are grouped into one panel per unit
-(so different units never share an axis) with a shared crosshair, legend and zoom, LTTB
-downsampling for large ranges, presets anchored to the newest selected reading, a typed custom
-range (`YYYY-MM-DD HH:MM`, local time) and a live-tail toggle. Light and dark
-follow the OS.
+Vite + React + TypeScript + Apache ECharts + react-grid-layout.
+
+- `App.tsx` is the dashboard shell: range controls, status line and the grid. `dashboard.ts`
+  holds the config shape and its `localStorage` persistence. `Widget.tsx` is one card with its
+  `SensorPicker.tsx`; `Chart.tsx` is the per-unit panel chart inside it.
+- `useSeriesStore.ts` fetches the union of all widgets' sensors for the dashboard range:
+  one stream per 16 sensors, only the missing sensors when a widget's selection changes, and a
+  single live-tail subscription. Series are flat typed arrays (`series.ts`) mutated in place;
+  a cheap version counter drives re-renders.
+- A Web Worker (`stream.worker.ts`) fetches and parses the NDJSON stream byte by byte and
+  posts rows back as transferable typed arrays; while rows stream, chart refreshes are paced by
+  how long the last one took. Eight sensors over all time (2.4 M points) load in about 2.3 s
+  and never block the page for more than ~0.3 s.
+- Presets anchor to the newest reading across the dashboard's sensors, so they always show
+  data. Custom ranges are typed (`YYYY-MM-DD HH:MM`, local time). Light and dark follow the OS.
 
 ```sh
 cd web && npm install
@@ -183,7 +200,7 @@ STATIC_DIR=web/dist cargo run -p api                    # API + built front end 
 Cargo.toml              workspace
 crates/generator/       data generator (sqlx + tokio): catchup / backfill / live
 crates/api/             axum API: streaming history, SSE live tail, serves web/dist
-web/                    React front end (Vite, ECharts)
+web/                    React dashboard front end (Vite, ECharts, react-grid-layout)
 db/init/001_schema.sql  schema, applied on first postgres start
 Dockerfile              multi-stage; `--target runtime --build-arg BIN=<crate>` for a bare
                         binary, `--target api` for the API bundled with the built front end
