@@ -1,1 +1,0 @@
-{"root":["./src/App.tsx","./src/Chart.tsx","./src/SensorPicker.tsx","./src/Widget.tsx","./src/api.ts","./src/dashboard.ts","./src/main.tsx","./src/series.ts","./src/stream.worker.ts","./src/useSeriesStore.ts"],"version":"5.9.3"}
