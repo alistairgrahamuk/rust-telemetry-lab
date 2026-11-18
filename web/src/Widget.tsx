@@ -17,14 +17,10 @@ interface Props {
   onRemove: () => void
 }
 
-/** A sensible title when the user has not typed one. */
+/** Default title: just the count; the legend already says which sensors they are. */
 export function autoTitle(selected: Selected[]): string {
   if (!selected.length) return 'Empty widget'
-  const devices = [...new Set(selected.map((s) => s.sensor.device))]
-  const metrics = [...new Set(selected.map((s) => s.sensor.metric))]
-  if (devices.length === 1) return `${devices[0]} · ${metrics.join(', ')}`
-  if (metrics.length === 1) return `${metrics[0]} · ${devices.length} devices`
-  return `${selected.length} sensors`
+  return `${selected.length} sensor${selected.length === 1 ? '' : 's'}`
 }
 
 /** One dashboard card: a header (drag handle, title, sensor picker, remove) over a chart. */
