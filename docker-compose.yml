@@ -47,11 +47,14 @@ services:
         condition: service_healthy
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-telemetry}:${POSTGRES_PASSWORD:-telemetry}@postgres:5432/${POSTGRES_DB:-telemetry}
-      MODE: ${MODE:-backfill}
+      # catchup (default): fill from the newest stored reading to now, then one reading per
+      # sensor every SAMPLE_INTERVAL_SECS. backfill: load START_DATE..END_DATE and exit.
+      MODE: ${MODE:-catchup}
       DEVICE_COUNT: ${DEVICE_COUNT:-50}
       BATCH_SIZE: ${BATCH_SIZE:-50000}
-      TRUNCATE_ON_START: ${TRUNCATE_ON_START:-true}
-      # backfill mode
+      # unset = true for backfill, false otherwise
+      TRUNCATE_ON_START: ${TRUNCATE_ON_START:-}
+      # backfill range; catchup uses START_DATE only when the table is empty
       START_DATE: ${START_DATE:-}
       END_DATE: ${END_DATE:-}
       SAMPLE_INTERVAL_SECS: ${SAMPLE_INTERVAL_SECS:-300}
@@ -59,7 +62,8 @@ services:
       BATCH_INTERVAL_MS: ${BATCH_INTERVAL_MS:-500}
       TOTAL_ROWS: ${TOTAL_ROWS:-0}
       RUST_LOG: info
-    # Backfill exits 0 when END_DATE is reached; only restart on a real failure.
+    # catchup runs until stopped; backfill exits 0 when END_DATE is reached. Only restart on a
+    # real failure so a finished backfill is not re-run (it would truncate and reload).
     restart: on-failure
 
 

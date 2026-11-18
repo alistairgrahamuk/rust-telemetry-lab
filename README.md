@@ -1,82 +1,137 @@
 # rust-telemetry-lab
 
-Postgres + a Rust generator that bulk-inserts random-walk sensor readings, and a Rust API
-that streams them to a React/ECharts front end.
+Postgres + a Rust generator that writes random-walk IoT sensor readings, and a Rust API that
+streams them to a React/ECharts front end.
 
-## Run
+The project is meant to be run locally and intermittently. The generator remembers nothing
+between runs; it reads the newest row in the table and carries on from there, so you can shut
+everything down for days, start it again, and the gap is filled before the chart opens.
+
+## Install
+
+You need Docker with Compose. Everything else (Rust, Node, Postgres) runs in containers.
 
 ```sh
-cp .env.example .env                        # optional, defaults work
-docker compose up -d                        # postgres + api (http://localhost:8080)
-docker compose --profile generate up -d     # ...plus the generator (inserts data)
-docker compose logs -f generator
-docker compose stop generator               # stop inserting, keep postgres up
+git clone <this repo> && cd rust-telemetry-lab
+cp .env.example .env            # optional; the defaults work as they are
+docker compose up -d            # postgres (localhost:5433) + api/web (http://localhost:8080)
 ```
 
-Open http://localhost:8080. Pick up to 8 sensors (any device, any metric) and a range; rows
-stream in as NDJSON and the chart fills progressively, one panel per unit with the selected
-sensors overlaid. With the generator in live mode (`MODE=live`), new rows arrive over
-Server-Sent Events and are appended to the chart.
+### 1. Load history once: pick a date range
 
-The generator sits behind the `generate` Compose profile, so it never starts unless you ask.
-To make it the default, put `COMPOSE_PROFILES=generate` in `.env`.
+Run a `backfill` for the span you want to look at. It writes one reading per sensor every
+5 minutes across the range, flat out, then exits. Dates are `YYYY-MM-DD` (midnight UTC) or
+RFC 3339; `END_DATE` is exclusive.
 
-Postgres is exposed on the host at `localhost:5433` (user/password/db all `telemetry`):
+```sh
+MODE=backfill START_DATE=2026-01-01 END_DATE=2026-11-18 docker compose --profile generate up -d
+docker compose logs -f generator     # Ctrl-C to stop watching; the load keeps going
+```
+
+A backfill **replaces** whatever is in `readings` (`TRUNCATE_ON_START` defaults to true in
+this mode). 50 devices × 3 sensors at a 5-minute cadence is about 1.3 M rows per month; 2024-01-01
+to 2026-11-17 (45 M rows) loads in roughly 2.5 minutes. The container exits 0 when done.
+
+### 2. Every time after that: catch up and keep up
+
+```sh
+docker compose --profile generate up -d
+```
+
+With no `MODE` set the generator runs in **catchup** mode, the default:
+
+1. finds the newest stored reading for every sensor;
+2. continues each sensor's random walk from its last value, so there is no jump at the join;
+3. fills from that reading to now, on the same 5-minute grid;
+4. then writes one reading per sensor every 5 minutes until stopped.
+
+If the machine sleeps or the container is stopped, the next start fills whatever fell due
+in the meantime. Nothing is truncated in this mode. If you run step 2 on an empty table it
+loads the last 30 days first (or `START_DATE`..now, if set), so for a quick start you can skip
+step 1 entirely.
+
+To have the generator come up with a plain `docker compose up -d`, put `COMPOSE_PROFILES=generate`
+in `.env`.
+
+### Stopping
+
+```sh
+docker compose stop generator   # stop writing, keep postgres + api up
+docker compose down             # stop everything, keep the data
+docker compose down -v          # stop everything and drop the data
+```
+
+### Checking the data
 
 ```sh
 PGPASSWORD=telemetry psql -h 127.0.0.1 -p 5433 -U telemetry -d telemetry \
-  -c 'SELECT count(*) FROM readings;'
+  -c 'SELECT count(*), min(recorded_at), max(recorded_at) FROM readings;'
 ```
 
-Stop with `docker compose down` (keeps data) or `docker compose down -v` (drops data).
+## Using the UI
 
-## Generator modes
+Open http://localhost:8080. Pick up to 8 sensors (any device, any metric) and a range; rows
+stream in as NDJSON and the chart fills progressively, one panel per unit with the selected
+sensors overlaid. With the live-tail toggle on, each new 5-minute tick from the generator
+arrives over Server-Sent Events and is appended to the chart.
 
-**backfill** (default) writes one reading per sensor every `SAMPLE_INTERVAL_SECS` (5 min) from
-`START_DATE` to `END_DATE`, flat out, and exits when the end date is reached. Each device has
-three sensors (temperature, humidity, pressure), so 50 devices are 150 sensors and a month is
-1.3 M rows; 2024-01-01 to 2026-11-17 (45 M rows) loads in about 2.5 minutes. Series have a random walk, mean reversion and a
-daily temperature/humidity cycle so the data looks like real IoT telemetry.
+## Generator modes and settings
 
-Backfill loads with binary `COPY` and temporarily drops the `readings -> sensors` foreign
-key, re-adding and validating it when the load finishes. With the FK in place Postgres
-runs a lookup per row, which made loads ~6x slower.
+| `MODE`     | What it does                                                                                           | Exits?            |
+|------------|--------------------------------------------------------------------------------------------------------|-------------------|
+| `catchup`  | Default. Fill from the newest stored reading to now, then one reading per sensor per `SAMPLE_INTERVAL_SECS`. Empty table: loads `START_DATE`..now first. | No (Ctrl-C / `docker stop`) |
+| `backfill` | Load `START_DATE`..`END_DATE` with binary `COPY`, truncating first by default.                          | Yes, when done    |
+| `live`     | Load test: appends `BATCH_SIZE` rows stamped "now" every `BATCH_INTERVAL_MS`.                          | No, unless `TOTAL_ROWS` |
 
-**live** appends batches stamped "now" every `BATCH_INTERVAL_MS` until stopped.
+Each device has three sensors (temperature, humidity, pressure). Series have a random walk,
+mean reversion and a daily temperature/humidity cycle so the data looks like real telemetry.
 
-By default every run **truncates `readings` first** (`TRUNCATE_ON_START=true`). Set it to
-`false` to keep existing rows; `(sensor_id, recorded_at)` is unique, so overlapping reruns
-are skipped rather than duplicated.
+| Variable               | Default                   | Meaning                                                          |
+|------------------------|---------------------------|------------------------------------------------------------------|
+| `MODE`                 | catchup                   | `catchup`, `backfill` or `live`                                  |
+| `DEVICE_COUNT`         | 50                        | devices; each has 3 sensors                                      |
+| `SAMPLE_INTERVAL_SECS` | 300                       | seconds between readings for each sensor (the tick grid)         |
+| `START_DATE`           | 30 days before `END_DATE` | backfill start; catchup uses it only when the table is empty     |
+| `END_DATE`             | now                       | backfill end (exclusive); ignored by catchup                     |
+| `TRUNCATE_ON_START`    | true for backfill, else false | clear `readings` before the run                              |
+| `BATCH_SIZE`           | 50000                     | rows per COPY / INSERT                                           |
+| `BATCH_INTERVAL_MS`    | 500                       | live mode: pause between batches                                 |
+| `TOTAL_ROWS`           | 0                         | live mode: stop after N rows (0 = forever)                       |
+| `POSTGRES_HOST_PORT`   | 5433                      | host port mapped to Postgres                                     |
+| `API_HOST_PORT`        | 8080                      | host port for the web UI + API                                   |
+
+Examples:
 
 ```sh
-# a specific month
-START_DATE=2026-10-01 END_DATE=2026-11-01 docker compose --profile generate up -d
-# last 30 days (defaults), 200 devices (600 sensors), 1-minute cadence
+# full history then keep up, in one go (fresh database)
+START_DATE=2024-01-01 docker compose --profile generate up -d
+# replace everything with one specific month, then stop
+MODE=backfill START_DATE=2026-10-01 END_DATE=2026-11-01 docker compose --profile generate up -d
+# 200 devices (600 sensors) at a 1-minute cadence
 DEVICE_COUNT=200 SAMPLE_INTERVAL_SECS=60 docker compose --profile generate up -d
-# keep appending live data
-MODE=live docker compose --profile generate up -d
 ```
 
-| Variable               | Default      | Meaning                                              |
-|------------------------|--------------|------------------------------------------------------|
-| `MODE`                 | backfill     | `backfill` or `live`                                 |
-| `DEVICE_COUNT`         | 50           | devices; each has 3 sensors (channels)               |
-| `BATCH_SIZE`           | 50000        | rows per COPY (backfill) or INSERT (live)            |
-| `TRUNCATE_ON_START`    | true         | clear `readings` before the run                      |
-| `START_DATE`           | END_DATE-30d | backfill start, `YYYY-MM-DD` or RFC 3339             |
-| `END_DATE`             | now          | backfill end (exclusive); generator exits here       |
-| `SAMPLE_INTERVAL_SECS` | 300          | seconds between readings for each sensor             |
-| `BATCH_INTERVAL_MS`    | 500          | live mode: pause between batches                     |
-| `TOTAL_ROWS`           | 0            | live mode: stop after N rows (0 = forever)           |
-| `POSTGRES_HOST_PORT`   | 5433         | host port mapped to Postgres                         |
-| `API_HOST_PORT`        | 8080         | host port for the web UI + API                       |
+Keep `SAMPLE_INTERVAL_SECS` the same between runs; catchup continues the grid from the newest
+stored reading, so changing it shifts the grid from that point on. Raising `DEVICE_COUNT` later
+adds devices that have no history before the moment they were added.
+
+### How the two write paths differ
+
+**Backfill** loads with binary `COPY` and temporarily drops the `readings -> sensors` foreign
+key, re-adding and validating it when the load finishes, then runs `VACUUM ANALYZE`. With the FK
+in place Postgres runs a lookup per row, which made loads ~6x slower. A duplicate
+`(sensor_id, recorded_at)` aborts a COPY batch, which is why this mode truncates first.
+
+**Catchup** uses `INSERT ... ON CONFLICT DO NOTHING` with the FK in place: slower per row
+(~20k rows/s unoptimised, a day's gap is 43k rows) but it tolerates overlap and never
+revalidates the whole table. The initial load on an empty table takes the backfill path.
 
 ## API
 
 | Endpoint | Returns |
 |---|---|
 | `GET /api/sensors` | every sensor (device channel) with device, location, metric, unit and `first_ms`/`last_ms` |
-| `GET /api/readings/stream?sensor_ids=1,4,7&from=&to=` | NDJSON: a `{"type":"meta","count":N,...}` line, then `[sensor_id, ts_ms, value]` per row, ordered by sensor then time, streamed from a server-side cursor and gzip-compressed when accepted. `from`/`to` are RFC 3339; `to` is exclusive and both are optional. Up to 16 sensors per request. |
+| `GET /api/readings/stream?sensor_ids=1,4,7&from=&to=` | NDJSON: a `{"type":"meta","count":N,...}` line, then `[sensor_id, ts_ms, value]` per row, ordered by sensor then time, streamed from a server-side cursor and gzip/zstd-compressed when accepted. `from`/`to` are RFC 3339; `to` is exclusive and both are optional. Up to 16 sensors per request. |
 | `GET /api/readings/live?sensor_ids=1,4&after=` | SSE `rows` events with batches of `[sensor_id, ts_ms, value]` newer than `after` (polled every second) |
 
 Each sensor in the list is streamed as its own index-ordered cursor, back to back. One
@@ -89,10 +144,10 @@ fastest level. Timestamps are whole milliseconds end to end.
 The backfill writes one sensor's entire range, then the next, so a sensor's rows sit on
 contiguous heap pages. Written time-major (every sensor per tick) a single sensor's history
 spanned every page of the 2.3 GB table, and reading eight sensors meant reading it eight
-times; with the sensor-major layout the same query reads ~24 MB per sensor. The generator
-also runs `VACUUM ANALYZE` after a load so counts are index-only. Live-mode appends are
-time-major but small. If you add bulk loads from elsewhere, `CLUSTER readings USING
-readings_pkey` restores the layout.
+times; with the sensor-major layout the same query reads ~24 MB per sensor. Catchup's gap
+fill is also written sensor-major; the 5-minute ticks that follow are time-major but tiny.
+If you add bulk loads from elsewhere, `CLUSTER readings USING readings_pkey` restores the
+layout.
 
 ## Front end (`web/`)
 
@@ -101,9 +156,8 @@ stream byte by byte and posts rows back as transferable typed arrays; series are
 typed arrays and handed to ECharts without copying; while rows stream, chart refreshes are
 paced by how long the last one took. Eight sensors over all time (2.4 M points) load in about
 2.3 s and never block the page for more than ~0.3 s. A device × metric picker selects up to 8
-sensors;
-each keeps a fixed colour while selected. Sensors are grouped into one panel per unit (so
-different units never share an axis) with a shared crosshair, legend and zoom, LTTB
+sensors; each keeps a fixed colour while selected. Sensors are grouped into one panel per unit
+(so different units never share an axis) with a shared crosshair, legend and zoom, LTTB
 downsampling for large ranges, presets anchored to the newest selected reading, a typed custom
 range (`YYYY-MM-DD HH:MM`, local time), a live-tail toggle and a table view. Light and dark
 follow the OS.
@@ -113,17 +167,21 @@ cd web && npm install
 npm run dev          # http://localhost:5173, /api proxied to the Rust API on :8080
 ```
 
-Run the API locally against the Compose Postgres:
+## Developing without Docker for the Rust side
 
 ```sh
-DATABASE_URL=postgres://telemetry:telemetry@localhost:5433/telemetry STATIC_DIR=web/dist cargo run -p api
+docker compose up -d postgres
+export DATABASE_URL=postgres://telemetry:telemetry@localhost:5433/telemetry
+cargo run -p generator                                  # catchup mode
+MODE=backfill START_DATE=2026-10-01 cargo run -p generator
+STATIC_DIR=web/dist cargo run -p api                    # API + built front end on :8080
 ```
 
 ## Layout
 
 ```
 Cargo.toml              workspace
-crates/generator/       data generator (sqlx + tokio)
+crates/generator/       data generator (sqlx + tokio): catchup / backfill / live
 crates/api/             axum API: streaming history, SSE live tail, serves web/dist
 web/                    React front end (Vite, ECharts)
 db/init/001_schema.sql  schema, applied on first postgres start
@@ -139,10 +197,3 @@ docker-compose.yml      postgres + api, generator behind the `generate` profile
 - `readings(sensor_id, recorded_at, value)`
   - primary key `(sensor_id, recorded_at)`: one reading per sensor per instant, and serves per-sensor range queries
   - heap written sensor-major by the generator (see above); no time-only index
-
-## Local dev without Docker for the Rust side
-
-```sh
-docker compose up -d postgres
-DATABASE_URL=postgres://telemetry:telemetry@localhost:5433/telemetry cargo run -p generator
-```
