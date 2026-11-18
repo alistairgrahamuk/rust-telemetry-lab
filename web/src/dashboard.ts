@@ -12,9 +12,8 @@ export interface Widget {
 export interface Dashboard {
   widgets: Widget[]
   layout: Layout
-  /** Preset in days, or null for "All"; ignored while `custom` is set. */
+  /** Preset in days, or null for "All". */
   preset: number | null
-  custom: { from: number; to: number } | null
   live: boolean
 }
 
@@ -30,7 +29,7 @@ const KEY = 'telemetry.dashboard.v1'
 export const newId = () => Math.random().toString(36).slice(2, 10)
 
 export function emptyDashboard(): Dashboard {
-  return { widgets: [], layout: [], preset: 30, custom: null, live: true }
+  return { widgets: [], layout: [], preset: 30, live: true }
 }
 
 export function loadDashboard(): Dashboard | null {

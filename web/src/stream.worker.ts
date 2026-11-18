@@ -110,8 +110,13 @@ class RowParser {
   }
   flush() {
     if (!this.n) return
+    // A timed flush can land mid-row: fields of the row in progress are already committed at
+    // index n. Carry them into the fresh buffer or that row would surface with zeros (a sensor
+    // id of 0, or a timestamp of 0 = 1970).
+    const partial = this.field > 0 ? this.buf.slice(this.n * 3, this.n * 3 + this.field) : null
     post({ type: 'rows', buf: this.buf, n: this.n }, [this.buf.buffer])
     this.buf = new Float64Array(POST_ROWS * 3)
+    if (partial) this.buf.set(partial, 0)
     this.n = 0
     this.lastPost = performance.now()
   }

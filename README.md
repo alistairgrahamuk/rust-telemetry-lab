@@ -75,8 +75,8 @@ Open http://localhost:8080. The page is a **dashboard of chart widgets**:
 - **Add widget** puts a new card in the first free space. Each widget has its own sensor
   picker (any device, any metric, one sensor or up to 8), a title you can type, and a remove
   button. Drag a widget by its header; resize it from the bottom-right corner.
-- **The dashboard owns the time range.** Presets (24h to All), a typed custom range and the
-  live-tail toggle apply to every widget. Crosshair and zoom are linked across widgets.
+- **The dashboard owns the time range.** Presets (24h to All) and the live-tail toggle apply
+  to every widget. Crosshair and zoom are linked across widgets.
 - Inside a widget, sensors are grouped into one panel per unit so different units never share
   an axis. Small widgets drop the zoom slider; the mouse wheel still zooms.
 - The layout, every widget's sensors and the chosen range are saved in the browser
@@ -177,7 +177,7 @@ Vite + React + TypeScript + Apache ECharts + react-grid-layout.
   how long the last one took. Eight sensors over all time (2.4 M points) load in about 2.3 s
   and never block the page for more than ~0.3 s.
 - Presets anchor to the newest reading across the dashboard's sensors, so they always show
-  data. Custom ranges are typed (`YYYY-MM-DD HH:MM`, local time). Light and dark follow the OS.
+  data. Light and dark follow the OS.
 
 ```sh
 cd web && npm install

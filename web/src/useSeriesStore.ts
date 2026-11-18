@@ -75,6 +75,7 @@ export function useSeriesStore(wantedKey: string, fromMs: number | null, toMs: n
   /** Starts one stream for `ids` (≤ MAX_PER_REQUEST) and books it as in flight. */
   const startStream = (ids: number[]) => {
     const ctrl = new AbortController()
+    const mine = new Set(ids)
     for (const id of ids) { inflight.current.set(id, ctrl); seriesFor(id) }
     const c = counters.current
     c.pending++
@@ -86,8 +87,9 @@ export function useSeriesStore(wantedKey: string, fromMs: number | null, toMs: n
         let last: Series | null = null, lastSid = -1
         for (let i = 0; i < n; i++) {
           const sid = buf[i * 3]
-          if (sid !== lastSid) { last = seriesFor(sid); lastSid = sid }
-          last!.push(buf[i * 3 + 1], buf[i * 3 + 2])
+          // Only sensors this stream asked for: never let a malformed row create a ghost series.
+          if (sid !== lastSid) { last = mine.has(sid) ? seriesFor(sid) : null; lastSid = sid }
+          if (last) last.push(buf[i * 3 + 1], buf[i * 3 + 2])
         }
         c.loaded += n
         scheduleFlush({})

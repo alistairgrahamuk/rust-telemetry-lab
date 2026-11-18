@@ -15,21 +15,9 @@ const PRESETS: { label: string; days: number | null }[] = [
 ]
 
 const nf = new Intl.NumberFormat()
-const pad = (n: number) => String(n).padStart(2, '0')
-/** Local time as "YYYY-MM-DD HH:MM" for the plain-text range inputs. */
-function fmtLocal(ms: number) {
-  const d = new Date(ms)
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
-}
-/** Parses "YYYY-MM-DD" or "YYYY-MM-DD HH:MM" (local time); NaN if invalid. */
-function parseLocal(s: string) {
-  const m = /^\s*(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2}))?\s*$/.exec(s)
-  if (!m) return NaN
-  return new Date(+m[1], +m[2] - 1, +m[3], +(m[4] ?? 0), +(m[5] ?? 0)).getTime()
-}
 
-const HOUR = 3_600_000, MONTH = 30.44 * DAY, YEAR = 365.25 * DAY
-/** Approximate, readable span: the two largest non-zero units, e.g. "~2 years 3 months". */
+const HOUR = 3_600_000, MONTH = 30.44 * DAY
+/** Approximate, readable span: "~45 minutes", "~6 hours 10 minutes", "~30 days", "~1 year", "~2 years 11 months". */
 function humanSpan(ms: number): string {
   if (!(ms > 0)) return ''
   const unit = (n: number, name: string) => `${n} ${name}${n === 1 ? '' : 's'}`
@@ -38,26 +26,16 @@ function humanSpan(ms: number): string {
     const h = Math.floor(ms / HOUR), m = Math.round((ms - h * HOUR) / 60_000)
     return `~${unit(h, 'hour')}${m ? ' ' + unit(m, 'minute') : ''}`
   }
-  const parts: [number, string][] = [[YEAR, 'year'], [MONTH, 'month'], [DAY, 'day'], [HOUR, 'hour']]
-  const out: string[] = []
-  let rest = ms
-  for (const [size, name] of parts) {
-    const n = Math.floor(rest / size)
-    if (n > 0 || out.length) {
-      if (n > 0) out.push(unit(n, name))
-      rest -= n * size
-    }
-    if (out.length === 2) break
-  }
-  return `~${out.join(' ')}`
+  if (ms < 4 * MONTH) return `~${unit(Math.round(ms / DAY), 'day')}`
+  const months = Math.round(ms / MONTH)
+  const y = Math.floor(months / 12), m = months % 12
+  return `~${[y ? unit(y, 'year') : '', m ? unit(m, 'month') : ''].filter(Boolean).join(' ')}`
 }
 
 export default function App() {
   const [sensors, setSensors] = useState<Sensor[]>([])
   const [dash, setDash] = useState<Dashboard>(() => loadDashboard() ?? emptyDashboard())
   const [hadSaved] = useState(() => loadDashboard() != null)
-  const [draft, setDraft] = useState({ from: '', to: '' })
-  const [draftError, setDraftError] = useState<string | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
   const { width, containerRef, mounted } = useContainerWidth()
 
@@ -82,26 +60,17 @@ export default function App() {
   const wantedIds = useMemo(() => [...new Set(dash.widgets.flatMap(widgetSensorIds))].sort((a, b) => a - b), [dash.widgets])
   const wantedKey = wantedIds.join(',')
   const lastMs = wantedIds.reduce((acc, id) => Math.max(acc, byId.get(id)?.last_ms ?? 0), 0)
-  const firstMs = wantedIds.reduce((acc, id) => Math.min(acc, byId.get(id)?.first_ms ?? Infinity), Infinity)
+  // Presets are anchored to the newest reading so they always show data; `to` stays open so
+  // the live tail can attach.
   const range = useMemo(() => {
-    if (dash.custom) return { from: dash.custom.from, to: dash.custom.to }
     if (!lastMs || dash.preset == null) return { from: null, to: null }
     return { from: lastMs - dash.preset * DAY, to: null }
-  }, [dash.custom, dash.preset, lastMs])
+  }, [dash.preset, lastMs])
 
   const { series, state } = useSeriesStore(wantedKey, range.from, range.to, dash.live)
   const streaming = state.pending > 0
 
-  const applyCustom = () => {
-    const from = parseLocal(draft.from), to = parseLocal(draft.to)
-    if (!Number.isFinite(from) || !Number.isFinite(to)) { setDraftError('Use YYYY-MM-DD or YYYY-MM-DD HH:MM'); return }
-    if (from >= to) { setDraftError('From must be before To'); return }
-    setDraftError(null); setDash((d) => ({ ...d, custom: { from, to }, preset: null }))
-  }
-  const pickPreset = (days: number | null) => { setDraftError(null); setDash((d) => ({ ...d, preset: days, custom: null })) }
-  const prefillDraft = () => {
-    if (!draft.from && !draft.to && Number.isFinite(firstMs) && lastMs) setDraft({ from: fmtLocal(firstMs), to: fmtLocal(lastMs) })
-  }
+  const pickPreset = (days: number | null) => setDash((d) => ({ ...d, preset: days }))
 
   const updateWidget = useCallback((id: string, fn: (w: WidgetConfig) => WidgetConfig) =>
     setDash((d) => ({ ...d, widgets: d.widgets.map((x) => (x.id === id ? fn(x) : x)) })), [])
@@ -124,27 +93,9 @@ export default function App() {
 
   return (
     <div className="app">
-      <div className="toolbar">
+      <div className="header">
         <h1>Telemetry</h1>
-        <button className="primary" onClick={() => setDash((d) => addWidget(d, []))}>+ Add widget</button>
-        <span className="spacer" />
-        <div className="presets" role="group" aria-label="Time range">
-          {PRESETS.map((p) => (
-            <button key={p.label} aria-pressed={!dash.custom && dash.preset === p.days} onClick={() => pickPreset(p.days)}>{p.label}</button>
-          ))}
-        </div>
-        <span className="field range">
-          <input type="text" inputMode="numeric" aria-label="From" placeholder="YYYY-MM-DD HH:MM" value={draft.from}
-            onFocus={prefillDraft} onChange={(e) => setDraft({ ...draft, from: e.target.value })} onKeyDown={(e) => e.key === 'Enter' && applyCustom()} />
-          –
-          <input type="text" inputMode="numeric" aria-label="To" placeholder="YYYY-MM-DD HH:MM" value={draft.to}
-            onFocus={prefillDraft} onChange={(e) => setDraft({ ...draft, to: e.target.value })} onKeyDown={(e) => e.key === 'Enter' && applyCustom()} />
-          <button onClick={applyCustom} disabled={!draft.from || !draft.to}>Apply</button>
-        </span>
-        <label className="toggle"><input type="checkbox" checked={dash.live} onChange={(e) => setDash((d) => ({ ...d, live: e.target.checked }))} /> Live tail</label>
-      </div>
-
-      <div className="status" aria-live="polite">
+        <div className="status" aria-live="polite">
         {!dash.widgets.length && sensors.length > 0 && <span>Add a widget to get started.</span>}
         {dash.widgets.length > 0 && !wantedIds.length && <span>Pick sensors on a widget to see data.</span>}
         {streaming && <>
@@ -158,11 +109,23 @@ export default function App() {
             {state.elapsedMs > 0 && <> in {(state.elapsedMs / 1000).toFixed(2)} s</>}
           </span>
         )}
-        {!streaming && wantedIds.length > 0 && range.to == null && (
+        {!streaming && wantedIds.length > 0 && (
           <span><span className={`dot${state.liveConnected ? ' live' : ''}`} />{state.liveConnected ? `Live · ${nf.format(state.liveCount)} new` : 'Live off'}</span>
         )}
-        {!streaming && wantedIds.length > 0 && range.to != null && <span><span className="dot" />Fixed range, live tail not attached</span>}
-        {(draftError || state.error || loadError) && <span className="error">{draftError ?? state.error ?? loadError}</span>}
+        {(state.error || loadError) && <span className="error">{state.error ?? loadError}</span>}
+        </div>
+      </div>
+
+      <div className="controls" role="toolbar" aria-label="Dashboard controls">
+        <button className="primary" onClick={() => setDash((d) => addWidget(d, []))}>+ Add widget</button>
+        <span className="sep" />
+        <div className="presets" role="group" aria-label="Time range">
+          {PRESETS.map((p) => (
+            <button key={p.label} aria-pressed={dash.preset === p.days} onClick={() => pickPreset(p.days)}>{p.label}</button>
+          ))}
+        </div>
+        <span className="sep" />
+        <label className="toggle"><input type="checkbox" checked={dash.live} onChange={(e) => setDash((d) => ({ ...d, live: e.target.checked }))} /> Live tail</label>
       </div>
 
       <div className="grid-host" ref={containerRef}>
