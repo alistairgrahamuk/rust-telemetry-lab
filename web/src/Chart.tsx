@@ -4,14 +4,12 @@ import { LineChart } from 'echarts/charts'
 import { DataZoomComponent, GridComponent, LegendComponent, TitleComponent, TooltipComponent } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
 import type { Sensor } from './api'
-import type { SeriesMap } from './series'
+import type { Series, SeriesMap } from './series'
 
 echarts.use([LineChart, GridComponent, TooltipComponent, DataZoomComponent, TitleComponent, LegendComponent, CanvasRenderer])
 
 /** Fixed slot order; a sensor keeps its slot for as long as it is selected. */
 export const SLOT_COUNT = 8
-/** All charts join this group so crosshair and zoom stay in step across widgets. */
-const GROUP = 'dashboard'
 /** Below this height the zoom slider is dropped so the panels keep room to breathe. */
 const COMPACT_BELOW_PX = 300
 
@@ -29,6 +27,17 @@ function fmtTime(ms: number) {
   return new Date(ms).toLocaleString(undefined, {
     year: 'numeric', month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit',
   })
+}
+
+/** Index of the point whose timestamp is closest to `t` (series are time-ordered). */
+function nearestIndex(ser: Series, t: number): number {
+  let lo = 0, hi = ser.len - 1
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1
+    if (ser.ts(mid) < t) lo = mid + 1
+    else hi = mid
+  }
+  return lo > 0 && t - ser.ts(lo - 1) < ser.ts(lo) - t ? lo - 1 : lo
 }
 
 export interface Selected {
@@ -125,11 +134,23 @@ export default function Chart({ series, version, selected, streaming }: Props) {
       axisPointer: { link: [{ xAxisIndex: 'all' }], lineStyle: { color: muted }, label: { backgroundColor: ink2 } },
       tooltip: {
         trigger: 'axis', backgroundColor: surface, borderColor: axis, textStyle: { color: ink, fontSize: 12 },
+        // ECharts only lists series with a point at the exact hovered instant, and LTTB keeps
+        // different points per series, so look up every series' nearest value ourselves.
         formatter: (params: unknown) => {
-          const ps = params as { seriesIndex: number; seriesName: string; value: [number, number]; marker: string }[]
+          const ps = params as { value: [number, number] }[]
           if (!ps.length) return ''
-          const lines = ps.map((p) => `${p.marker} ${p.seriesName}: <b>${p.value[1].toFixed(1)} ${order[p.seriesIndex]?.sensor.unit ?? ''}</b>`)
-          return `${fmtTime(ps[0].value[0])}<br/>${lines.join('<br/>')}`
+          const t = ps[0].value[0]
+          const lines: string[] = []
+          for (const it of order) {
+            const ser = series.current?.get(it.sensor.id)
+            if (!ser || !ser.len) continue
+            const i = nearestIndex(ser, t)
+            // Skip series with no reading near this instant (more than two typical gaps away).
+            const gap = ser.len > 1 ? (ser.lastTs() - ser.ts(0)) / (ser.len - 1) : Infinity
+            if (Math.abs(ser.ts(i) - t) > 2 * gap) continue
+            lines.push(`<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${slotColor(it.slot)};margin-right:6px"></span>${seriesName(it.sensor)}: <b>${ser.value(i).toFixed(1)} ${it.sensor.unit}</b>`)
+          }
+          return `${fmtTime(t)}<br/>${lines.join('<br/>')}`
         },
       },
       grid: panels.map((_, i) => gridFor(i)),
@@ -171,11 +192,8 @@ export default function Chart({ series, version, selected, streaming }: Props) {
   // Create once; rebuild the whole option when the panel structure or theme changes.
   useEffect(() => {
     if (!el.current) return
-    if (!chart.current) {
-      chart.current = echarts.init(el.current, undefined, { renderer: 'canvas' })
-      chart.current.group = GROUP
-      echarts.connect(GROUP)
-    }
+    // Each widget is independent: no ECharts group, so hover and zoom stay within the widget.
+    if (!chart.current) chart.current = echarts.init(el.current, undefined, { renderer: 'canvas' })
     chart.current.setOption(buildOption(), { notMerge: true })
     const mq = window.matchMedia('(prefers-color-scheme: dark)')
     const onTheme = () => chart.current?.setOption(buildOption(), { notMerge: true })

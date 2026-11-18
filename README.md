@@ -76,7 +76,7 @@ Open http://localhost:8080. The page is a **dashboard of chart widgets**:
   picker (any device, any metric, one sensor or up to 8), a title you can type, and a remove
   button. Drag a widget by its header; resize it from the bottom-right corner.
 - **The dashboard owns the time range.** Presets (24h to All) and the live-tail toggle apply
-  to every widget. Crosshair and zoom are linked across widgets.
+  to every widget. Hover, crosshair and zoom within a widget are independent of the others.
 - Inside a widget, sensors are grouped into one panel per unit so different units never share
   an axis. Small widgets drop the zoom slider; the mouse wheel still zooms.
 - The layout, every widget's sensors and the chosen range are saved in the browser
