@@ -60,7 +60,16 @@ struct Sensor {
 }
 
 async fn sensors(State(st): State<AppState>) -> Result<Json<Vec<Sensor>>, ApiError> {
-    type SensorRow = (i16, i16, String, String, String, String, Option<DateTime<Utc>>, Option<DateTime<Utc>>);
+    type SensorRow = (
+        i16,
+        i16,
+        String,
+        String,
+        String,
+        String,
+        Option<DateTime<Utc>>,
+        Option<DateTime<Utc>>,
+    );
     let rows: Vec<SensorRow> = sqlx::query_as(
         "SELECT s.id, d.id, d.name, d.location, s.metric, s.unit,
                 (SELECT min(recorded_at) FROM readings r WHERE r.sensor_id = s.id),
@@ -92,7 +101,11 @@ fn parse_ids(raw: &str) -> Result<Vec<i16>, ApiError> {
     let mut ids: Vec<i16> = raw
         .split(',')
         .filter(|s| !s.trim().is_empty())
-        .map(|s| s.trim().parse::<i16>().map_err(|_| ApiError::bad_request(format!("invalid sensor id {s:?}"))))
+        .map(|s| {
+            s.trim()
+                .parse::<i16>()
+                .map_err(|_| ApiError::bad_request(format!("invalid sensor id {s:?}")))
+        })
         .collect::<Result<_, _>>()?;
     ids.sort_unstable();
     ids.dedup();
@@ -100,7 +113,9 @@ fn parse_ids(raw: &str) -> Result<Vec<i16>, ApiError> {
         return Err(ApiError::bad_request("sensor_ids is required".into()));
     }
     if ids.len() > MAX_SENSORS_PER_REQUEST {
-        return Err(ApiError::bad_request(format!("at most {MAX_SENSORS_PER_REQUEST} sensors per request")));
+        return Err(ApiError::bad_request(format!(
+            "at most {MAX_SENSORS_PER_REQUEST} sensors per request"
+        )));
     }
     Ok(ids)
 }
@@ -120,7 +135,8 @@ async fn stream_readings(State(st): State<AppState>, Query(q): Query<RangeQuery>
     let ids = parse_ids(&q.sensor_ids)?;
     // chrono's MIN/MAX overflow Postgres' timestamptz range; use epoch..9999-12-31.
     let from = q.from.unwrap_or_else(|| DateTime::from_timestamp(0, 0).unwrap());
-    let to = q.to.unwrap_or_else(|| DateTime::from_timestamp(253_402_300_799, 0).unwrap());
+    let to =
+        q.to.unwrap_or_else(|| DateTime::from_timestamp(253_402_300_799, 0).unwrap());
 
     // Cheap index-only counts so the client can show progress. One query per sensor: with
     // several ids in an ANY(...) the planner prefers a parallel seq scan + sort over the
@@ -180,7 +196,10 @@ async fn stream_readings(State(st): State<AppState>, Query(q): Query<RangeQuery>
     };
 
     Ok((
-        [(header::CONTENT_TYPE, "application/x-ndjson"), (header::CACHE_CONTROL, "no-store")],
+        [
+            (header::CONTENT_TYPE, "application/x-ndjson"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
         Body::from_stream(body),
     )
         .into_response())
@@ -292,7 +311,12 @@ async fn main() -> Result<()> {
         // Measured on a 60 MB / 2.4 M-row stream: plain 1.9 s, zstd 1.95 s (10.9 MB), gzip
         // level 1 1.96 s (15.4 MB); the default gzip level took 4.6 s and was the bottleneck
         // for the browser. Skips text/event-stream by default.
-        .layer(CompressionLayer::new().zstd(true).gzip(true).quality(CompressionLevel::Fastest))
+        .layer(
+            CompressionLayer::new()
+                .zstd(true)
+                .gzip(true)
+                .quality(CompressionLevel::Fastest),
+        )
         .layer(TraceLayer::new_for_http())
         .with_state(AppState { pool });
 

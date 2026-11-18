@@ -95,15 +95,18 @@ fn parse_date(s: &str) -> Result<DateTime<Utc>> {
 }
 
 fn env_or<T: std::str::FromStr>(key: &str, default: T) -> T {
-    std::env::var(key).ok().and_then(|v| v.trim().parse().ok()).unwrap_or(default)
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(default)
 }
 
 /// Resolves on SIGINT (Ctrl-C) or SIGTERM (`docker stop`).
 async fn shutdown_signal() {
     #[cfg(unix)]
     {
-        let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("install SIGTERM handler");
+        let mut term =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("install SIGTERM handler");
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {}
             _ = term.recv() => {}
@@ -153,8 +156,18 @@ struct LastReading {
 
 impl DeviceState {
     fn new(id: i16, rng: &mut impl Rng) -> Self {
-        let baseline = [rng.gen_range(15.0..25.0), rng.gen_range(35.0..65.0), rng.gen_range(995.0..1025.0)];
-        Self { id, baseline, temperature: baseline[0], humidity: baseline[1], pressure: baseline[2] }
+        let baseline = [
+            rng.gen_range(15.0..25.0),
+            rng.gen_range(35.0..65.0),
+            rng.gen_range(995.0..1025.0),
+        ];
+        Self {
+            id,
+            baseline,
+            temperature: baseline[0],
+            humidity: baseline[1],
+            pressure: baseline[2],
+        }
     }
 
     /// Continue the walk from the values last written to the table (minus the daily cycle that
@@ -179,9 +192,13 @@ impl DeviceState {
     /// Pushes one reading per metric.
     fn sample(&mut self, rng: &mut impl Rng, at: DateTime<Utc>, out: &mut Vec<Reading>) {
         const REVERT: f32 = 0.01;
-        self.temperature = (self.temperature + REVERT * (self.baseline[0] - self.temperature) + rng.gen_range(-0.3..0.3)).clamp(-20.0, 60.0);
-        self.humidity = (self.humidity + REVERT * (self.baseline[1] - self.humidity) + rng.gen_range(-0.8..0.8)).clamp(0.0, 100.0);
-        self.pressure = (self.pressure + REVERT * (self.baseline[2] - self.pressure) + rng.gen_range(-0.2..0.2)).clamp(950.0, 1060.0);
+        self.temperature =
+            (self.temperature + REVERT * (self.baseline[0] - self.temperature) + rng.gen_range(-0.3..0.3))
+                .clamp(-20.0, 60.0);
+        self.humidity =
+            (self.humidity + REVERT * (self.baseline[1] - self.humidity) + rng.gen_range(-0.8..0.8)).clamp(0.0, 100.0);
+        self.pressure = (self.pressure + REVERT * (self.baseline[2] - self.pressure) + rng.gen_range(-0.2..0.2))
+            .clamp(950.0, 1060.0);
 
         let cycle = diurnal(at);
         let values = [
@@ -190,7 +207,11 @@ impl DeviceState {
             self.pressure,
         ];
         for (i, value) in values.into_iter().enumerate() {
-            out.push(Reading { sensor_id: sensor_id(self.id, i), at, value });
+            out.push(Reading {
+                sensor_id: sensor_id(self.id, i),
+                at,
+                value,
+            });
         }
     }
 }
@@ -198,8 +219,10 @@ impl DeviceState {
 async fn ensure_devices_and_sensors(pool: &PgPool, count: i16) -> Result<()> {
     let ids: Vec<i16> = (1..=count).collect();
     let names: Vec<String> = ids.iter().map(|i| format!("sensor-{i:03}")).collect();
-    let locations: Vec<String> =
-        ids.iter().map(|i| format!("building-{}/floor-{}", (i - 1) / 20 + 1, (i - 1) % 20 / 5 + 1)).collect();
+    let locations: Vec<String> = ids
+        .iter()
+        .map(|i| format!("building-{}/floor-{}", (i - 1) / 20 + 1, (i - 1) % 20 / 5 + 1))
+        .collect();
 
     sqlx::query(
         "INSERT INTO devices (id, name, location)
@@ -255,7 +278,10 @@ async fn last_readings(pool: &PgPool) -> Result<Vec<LastReading>> {
     .fetch_all(pool)
     .await
     .context("reading newest row per sensor")?;
-    Ok(rows.into_iter().map(|(sensor_id, at, value)| LastReading { sensor_id, at, value }).collect())
+    Ok(rows
+        .into_iter()
+        .map(|(sensor_id, at, value)| LastReading { sensor_id, at, value })
+        .collect())
 }
 
 /// INSERT ... ON CONFLICT DO NOTHING via UNNEST. Slower than COPY, but tolerates duplicate
@@ -377,8 +403,14 @@ async fn run_backfill(
 
     // Set visibility-map bits and refresh stats so counts and range scans are index-only.
     let t = std::time::Instant::now();
-    sqlx::query("VACUUM ANALYZE readings").execute(pool).await.context("vacuum analyze")?;
-    info!(elapsed_secs = format!("{:.1}", t.elapsed().as_secs_f64()), "vacuum analyze complete");
+    sqlx::query("VACUUM ANALYZE readings")
+        .execute(pool)
+        .await
+        .context("vacuum analyze")?;
+    info!(
+        elapsed_secs = format!("{:.1}", t.elapsed().as_secs_f64()),
+        "vacuum analyze complete"
+    );
     Ok(())
 }
 
@@ -429,7 +461,11 @@ async fn write_range(
         // De-interleave: write each of the device's sensors as one contiguous run.
         for m in 0..METRICS_PER_DEVICE {
             for r in tick_buf.iter().skip(m).step_by(METRICS_PER_DEVICE) {
-                flush_buf.push(Reading { sensor_id: r.sensor_id, at: r.at, value: r.value });
+                flush_buf.push(Reading {
+                    sensor_id: r.sensor_id,
+                    at: r.at,
+                    value: r.value,
+                });
                 if flush_buf.len() >= cfg.batch_size {
                     inserted += flush(writer, pool, &mut flush_buf).await?;
                 }
@@ -438,13 +474,23 @@ async fn write_range(
         }
         if last_log.elapsed() >= Duration::from_secs(2) {
             let pct = inserted as f64 * 100.0 / expected.max(1) as f64;
-            info!(inserted, pct = format!("{pct:.1}%"), device = d.id, "range load progress");
+            info!(
+                inserted,
+                pct = format!("{pct:.1}%"),
+                device = d.id,
+                "range load progress"
+            );
             last_log = std::time::Instant::now();
         }
     }
 
     let secs = started.elapsed().as_secs_f64().max(0.001);
-    info!(inserted, rows_per_sec = (inserted as f64 / secs) as u64, elapsed_secs = format!("{secs:.1}"), "range load complete");
+    info!(
+        inserted,
+        rows_per_sec = (inserted as f64 / secs) as u64,
+        elapsed_secs = format!("{secs:.1}"),
+        "range load complete"
+    );
     Ok(inserted)
 }
 
@@ -516,7 +562,12 @@ async fn run_catchup(cfg: &Config, pool: &PgPool, devices: &mut [DeviceState], r
 }
 
 async fn run_live(cfg: &Config, pool: &PgPool, devices: &mut [DeviceState], rng: &mut StdRng) -> Result<()> {
-    info!(batch = cfg.batch_size, interval_ms = cfg.batch_interval.as_millis(), total = cfg.total_rows, "live mode starting");
+    info!(
+        batch = cfg.batch_size,
+        interval_ms = cfg.batch_interval.as_millis(),
+        total = cfg.total_rows,
+        "live mode starting"
+    );
     let mut buf: Vec<Reading> = Vec::with_capacity(cfg.batch_size);
     let mut inserted: u64 = 0;
     let mut ticker = tokio::time::interval(cfg.batch_interval.max(Duration::from_millis(1)));
@@ -571,13 +622,18 @@ async fn main() -> Result<()> {
         .context("connecting to postgres")?;
 
     if cfg.truncate_on_start {
-        sqlx::query("TRUNCATE readings RESTART IDENTITY").execute(&pool).await.context("truncating readings")?;
+        sqlx::query("TRUNCATE readings RESTART IDENTITY")
+            .execute(&pool)
+            .await
+            .context("truncating readings")?;
         info!("cleared existing readings");
     }
     ensure_devices_and_sensors(&pool, cfg.device_count).await?;
 
     let mut rng = StdRng::from_entropy();
-    let mut devices: Vec<DeviceState> = (1..=cfg.device_count).map(|id| DeviceState::new(id, &mut rng)).collect();
+    let mut devices: Vec<DeviceState> = (1..=cfg.device_count)
+        .map(|id| DeviceState::new(id, &mut rng))
+        .collect();
 
     match cfg.mode {
         Mode::Catchup => run_catchup(&cfg, &pool, &mut devices, &mut rng).await?,
